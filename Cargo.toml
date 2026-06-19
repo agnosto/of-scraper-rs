@@ -1,6 +1,48 @@
+[workspace]
+members = [
+    "of-client",
+    "of-deserializers",
+]
+
+[workspace.dependencies]
+log = "0.4.22"
+thiserror = "2.0.9"
+futures = "0.3.21"
+futures-util = "0.3.21"
+serde_json = "1.0.134"
+tokio = "1.42.0"
+serde = { version = "1.0.216", features = ["derive"] }
+reqwest = "0.12.9"
+httpdate = "1.0.3"
+chrono = "0.4.39"
+
+deserializers = { path = "of-deserializers" }
+of-client = { path = "of-client" }
+
 [package]
 name = "onlyfans-scraper"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+of-client = { workspace = true }
+deserializers = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+anyhow = "1.0.95"
+clap = { version = "4.5.23", features = ["derive"] }
+ratatui = { version = "0.29.0", features = ["all-widgets"] }
+crossterm = "0.27.0"
+configparser = "3.1.0"
+log = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+cookie = "0.18.1"
+reqwest = { workspace = true, features = ["stream"] }
+chrono = { workspace = true }
+ffmpeg-sidecar = { version = "2.0.5", default-features = false }
+base16 = "0.2"
+tempfile = "3.14.0"
+filetime = "0.2.25"
+futures = { workspace = true }
+futures-util = { workspace = true }
+httpdate = { workspace = true }
