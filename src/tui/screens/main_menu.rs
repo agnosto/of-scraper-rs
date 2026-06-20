@@ -71,30 +71,55 @@ impl Screen for MainMenuScreen {
             .split(area);
 
         let banner = Paragraph::new(vec![
+
             Line::from(Span::styled(
-                r"   ____  ______   _____                                          ",
+
+                r"   ____  ______   _____                                                ",
+
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+
             )),
+
             Line::from(Span::styled(
-                r"  / __ \/ ____/  / ___/_______________ _____  ___  _____",
+
+                r"  / __ \/ ____/  / ___/______________ _____  ___  _____      __________",
+
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+
             )),
+
             Line::from(Span::styled(
-                r" / / / / /_______\__ \/ ___/ ___/ __ `/ __ \/ _ \/ ___/",
+
+                r" / / / / /_______\__ \/ ___/ ___/ __ `/ __ \/ _ \/ ___/_____/ ___/ ___/",
+
                 Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+
             )),
+
             Line::from(Span::styled(
-                r"/ /_/ / __/_____/__/ / /__/ /  / /_/ / /_/ /  __/ /    ",
+
+                r"/ /_/ / __/_____/__/ / /__/ /  / /_/ / /_/ /  __/ /  /_____/ /  (__  ) ",
+
                 Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+
             )),
+
             Line::from(Span::styled(
-                r"\____/_/       /____/\___/_/   \__,_/ .___/\___/_/     ",
+
+                r"\____/_/       /____/\___/_/   \__,_/ .___/\___/_/        /_/  /____/  ",
+
                 Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+
             )),
+
             Line::from(Span::styled(
+
                 r"                                   /_/",
+
                 Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+
             )),
+
         ]);
         frame.render_widget(banner, chunks[0]);
 
