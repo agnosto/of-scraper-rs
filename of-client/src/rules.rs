@@ -58,7 +58,7 @@ impl DynamicRulesProvider {
 
 		let remote = async {
 			// Placeholder for Gist/Remote URL - User to update this
-			let url = "https://gist.githubusercontent.com/user/id/raw/rules.json"; 
+			let url = "https://gist.githubusercontent.com/agnosto/6c19366639d71cf44742b462da4be409/raw/a7677fb4a416db5a520b8239e0049b6abbeabf5a/rules.json";
 			let mut req = self.client.get(url);
 
 			if let Some((_, modified)) = local {
