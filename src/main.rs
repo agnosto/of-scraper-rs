@@ -118,15 +118,6 @@ impl CustomConfig {
     }
 }
 
-/// Resolve a config-ish filename ("config.conf", "auth.json", "device.wvd")
-/// by checking, in order:
-///   1. The directory the binary itself lives in (legacy behavior).
-///   2. The current working directory (covers `cargo run` from the repo).
-///   3. The OS-standard config dir: `~/.config/of-scraper-rs` on Linux,
-///      `~/Library/Application Support/of-scraper-rs` on macOS,
-///      `%APPDATA%\of-scraper-rs` on Windows.
-/// If none exist yet, returns the OS-standard path so a fresh file gets
-/// created somewhere sensible rather than next to the binary.
 fn resolve_config_path(filename: &str) -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
