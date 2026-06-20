@@ -19,7 +19,7 @@ cross-compiles for Linux, Windows, and macOS and bundles
 it manually from the Actions tab, or build from source:
 
 ```sh
-git clone <this repo>
+git clone https://github.com/agnosto/of-scraper-rs.git
 cd of-scraper-rs
 cargo build --release
 ```

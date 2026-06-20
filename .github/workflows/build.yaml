@@ -1,5 +1,10 @@
 name: Build and bundle of-scraper-rs
-on: workflow_dispatch
+name: Build and bundle of-scraper-rs
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
 
 jobs:
   build:
@@ -40,8 +45,27 @@ jobs:
           cp config.conf-example bundle/
           cp auth.json-example bundle/
 
-      - name: Upload
+      - name: Zip bundle (for release upload)
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          cd bundle
+          zip -r "../${{ matrix.artifact_name }}.zip" .
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
           path: bundle/
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact_name }}.zip
+
+  # Pushing a tag like v0.1.0 (matching the version in Cargo.toml, though
+  # nothing enforces that match automatically) creates a GitHub Release
+  # and attaches each platform's zipped bundle to it. A plain manual
+  # workflow_dispatch run still just produces the per-OS artifacts above
+  # without creating a release.
