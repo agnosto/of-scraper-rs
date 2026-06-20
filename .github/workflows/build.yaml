@@ -1,0 +1,47 @@
+name: Build and bundle of-scraper-rs
+on: workflow_dispatch
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: of-scraper-rs-linux-x86_64
+            binary_name: of-scraper-rs
+          - os: windows-latest
+            artifact_name: of-scraper-rs-windows-x86_64
+            binary_name: of-scraper-rs.exe
+          - os: macos-latest
+            artifact_name: of-scraper-rs-macos-aarch64
+            binary_name: of-scraper-rs
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry/build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Stage bundle
+        shell: bash
+        run: |
+          mkdir -p bundle
+          cp "target/release/${{ matrix.binary_name }}" bundle/
+          cp config.conf-example bundle/
+          cp auth.json-example bundle/
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: bundle/
