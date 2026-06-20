@@ -1,6 +1,10 @@
 # Auth
 Auth {
   DisableBrowserAuth = false
+  Sess = ""
+  Auth_Id = ""
+  User_Agent = ""
+  X_Bc = ""
 }
 # External Tools
 External {
