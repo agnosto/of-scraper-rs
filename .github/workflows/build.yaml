@@ -1,5 +1,4 @@
 name: Build and bundle of-scraper-rs
-name: Build and bundle of-scraper-rs
 on:
   workflow_dispatch:
   push:
