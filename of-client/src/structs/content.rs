@@ -19,6 +19,8 @@ pub enum ContentType {
 	Notifications,
 	Streams,
 	Purchased,
+	Highlights,
+	Labels,
 }
 
 impl fmt::Display for ContentType {
@@ -30,6 +32,8 @@ impl fmt::Display for ContentType {
 			ContentType::Notifications => "Notifications",
 			ContentType::Streams => "Streams",
 			ContentType::Purchased => "Purchases",
+			ContentType::Highlights => "Highlights",
+			ContentType::Labels => "Labels",
 		})
 	}
 }
@@ -72,10 +76,6 @@ pub struct ChatFromUser {
 	pub id: u64,
 }
 
-/// The real `/chats/{id}/messages` endpoint wraps results in an envelope
-/// (`{"list": [...], "hasMore": bool, ...}`), it's not a bare JSON array —
-/// see the captured response: `get_chats` was deserializing straight into
-/// `Vec<Chat>` and failing to decode every single page.
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct ChatsResponse {
@@ -85,14 +85,6 @@ struct ChatsResponse {
 	has_more: bool,
 }
 
-/// `/posts/paid/all` mixes two completely different shapes in the same
-/// list: purchased PPV *messages* (`responseType: "message"`, no `author`
-/// field, dated by `createdAt`) and purchased *posts* (`responseType:
-/// "post"`, has an `author` object, dated by `postedAt`). We reuse the
-/// existing `Chat`/`Post` structs as the two variants — serde's internally
-/// tagged enum just buffers the whole object and feeds it to whichever
-/// variant matched `responseType`, so the extra `responseType` key itself
-/// is simply an unrecognized field each struct already ignores.
 #[derive(Deserialize, Debug)]
 #[serde(tag = "responseType")]
 pub enum Purchase {
@@ -121,6 +113,90 @@ pub struct Story {
 	pub created_at: DateTime<Utc>,
 	#[serde(default)]
 	pub media: Vec<media::Feed>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct HighlightSummary {
+	pub id: u64,
+	#[serde(default)]
+	pub title: String,
+	#[serde(default)]
+	pub stories_count: u32,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct HighlightsResponse {
+	#[serde(default)]
+	list: Vec<HighlightSummary>,
+	#[serde(default)]
+	has_more: bool,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct HighlightDetail {
+	pub id: u64,
+	#[serde(default)]
+	pub title: String,
+	#[serde(default = "Utc::now")]
+	pub created_at: DateTime<Utc>,
+	#[serde(default)]
+	pub stories: Vec<Story>,
+}
+
+#[derive(Debug)]
+pub struct Highlight {
+	pub id: u64,
+	pub title: String,
+	pub created_at: DateTime<Utc>,
+	media: Vec<media::Feed>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum LabelId {
+	Number(u64),
+	Text(String),
+}
+
+impl fmt::Display for LabelId {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			LabelId::Number(n) => write!(f, "{}", n),
+			LabelId::Text(s) => write!(f, "{}", s),
+		}
+	}
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Label {
+	pub id: LabelId,
+	pub name: String,
+	#[serde(rename = "type")]
+	pub label_type: String,
+	#[serde(default)]
+	pub posts_count: u32,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct LabelsResponse {
+	#[serde(default)]
+	list: Vec<Label>,
+	#[serde(default)]
+	has_more: bool,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct LabelPostsResponse {
+	#[serde(default)]
+	list: Vec<Post>,
+	#[serde(default)]
+	has_more: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -229,6 +305,17 @@ impl Content for Stream {
 impl HasMedia for Stream {
 	type Media = media::Stream;
 	fn media(&self) -> &[Self::Media] { slice::from_ref(&self.media) }
+}
+
+impl Content for Highlight {
+	fn id(&self) -> u64 { self.id }
+	fn timestamp(&self) -> DateTime<Utc> { self.created_at }
+	fn content_type() -> ContentType { ContentType::Highlights }
+}
+
+impl HasMedia for Highlight {
+	type Media = media::Feed;
+	fn media(&self) -> &[Self::Media] { &self.media }
 }
 
 impl Content for Purchase {
@@ -341,6 +428,100 @@ impl OFClient {
 				Err(reqwest_middleware::Error::Middleware(
 					anyhow::anyhow!("Failed to decode purchases response: {e}")
 				))
+			}
+		}
+	}
+
+	/// Lightweight list of a creator's highlight reels. Each entry here is
+	/// just a cover + title — call `get_highlight` per id to actually get
+	/// downloadable media.
+	pub async fn get_highlights<I: fmt::Display>(&self, user_id: I, offset: u64) -> reqwest_middleware::Result<(Vec<HighlightSummary>, bool)> {
+		let url = format!(
+			"https://onlyfans.com/api2/v2/users/{user_id}/stories/highlights?limit=5&offset={offset}&sort=recent%3Adesc"
+		);
+		let response = self.get(url).send().await?;
+		let body = response.text().await.map_err(reqwest_middleware::Error::Reqwest)?;
+
+		match serde_json::from_str::<HighlightsResponse>(&body) {
+			Ok(wrapped) => Ok((wrapped.list, wrapped.has_more)),
+			Err(e) => {
+				let snippet: String = body.chars().take(2000).collect();
+				error!("Failed to decode highlights response ({}): {}", e, snippet);
+				Err(reqwest_middleware::Error::Middleware(
+					anyhow::anyhow!("Failed to decode highlights response: {e}")
+				))
+			}
+		}
+	}
+
+	/// Full contents of one highlight reel, with every contained story's
+	/// media flattened into a single downloadable bundle.
+	pub async fn get_highlight(&self, highlight_id: u64) -> reqwest_middleware::Result<Highlight> {
+		let url = format!("https://onlyfans.com/api2/v2/stories/highlights/{highlight_id}");
+		let response = self.get(url).send().await?;
+		let body = response.text().await.map_err(reqwest_middleware::Error::Reqwest)?;
+
+		match serde_json::from_str::<HighlightDetail>(&body) {
+			Ok(detail) => {
+				let media = detail.stories.into_iter().flat_map(|s| s.media).collect();
+				Ok(Highlight { id: detail.id, title: detail.title, created_at: detail.created_at, media })
+			}
+			Err(e) => {
+				let snippet: String = body.chars().take(2000).collect();
+				error!("Failed to decode highlight detail response ({}): {}", e, snippet);
+				Err(reqwest_middleware::Error::Middleware(
+					anyhow::anyhow!("Failed to decode highlight detail response: {e}")
+				))
+			}
+		}
+	}
+
+	/// A creator's custom content labels/folders, plus the built-in
+	/// "Archive" pseudo-label (`id: "archived"`).
+	pub async fn get_labels<I: fmt::Display>(&self, user_id: I, offset: u64) -> reqwest_middleware::Result<(Vec<Label>, bool)> {
+		let url = format!("https://onlyfans.com/api2/v2/users/{user_id}/labels?limit=10&offset={offset}&non-empty=1");
+		let response = self.get(url).send().await?;
+		let body = response.text().await.map_err(reqwest_middleware::Error::Reqwest)?;
+
+		match serde_json::from_str::<LabelsResponse>(&body) {
+			Ok(wrapped) => Ok((wrapped.list, wrapped.has_more)),
+			Err(e) => {
+				let snippet: String = body.chars().take(2000).collect();
+				error!("Failed to decode labels response ({}): {}", e, snippet);
+				Err(reqwest_middleware::Error::Middleware(
+					anyhow::anyhow!("Failed to decode labels response: {e}")
+				))
+			}
+		}
+	}
+
+	/// Posts filed under one specific label/folder.
+	pub async fn get_posts_by_label<I: fmt::Display>(&self, user_id: I, label_id: &LabelId, before_publish_time: Option<DateTime<Utc>>) -> reqwest_middleware::Result<Vec<Post>> {
+		let mut url = format!(
+			"https://onlyfans.com/api2/v2/users/{user_id}/posts?limit=10&order=publish_date_desc&skip_users=all&format=infinite&label={label_id}&counters=0"
+		);
+		if let Some(time) = before_publish_time {
+			url.push_str(&format!("&beforePublishTime={}.000000", time.timestamp()));
+		}
+
+		let response = self.get(url).send().await?;
+		let body = response.text().await.map_err(reqwest_middleware::Error::Reqwest)?;
+
+		match serde_json::from_str::<LabelPostsResponse>(&body) {
+			Ok(wrapped) => Ok(wrapped.list),
+			Err(_) => {
+				// Maybe it's actually a bare array like the unlabeled
+				// posts endpoint, not the {list, hasMore} envelope.
+				match serde_json::from_str::<Vec<Post>>(&body) {
+					Ok(list) => Ok(list),
+					Err(e) => {
+						let snippet: String = body.chars().take(2000).collect();
+						error!("Failed to decode label posts response ({}): {}", e, snippet);
+						Err(reqwest_middleware::Error::Middleware(
+							anyhow::anyhow!("Failed to decode label posts response: {e}")
+						))
+					}
+				}
 			}
 		}
 	}

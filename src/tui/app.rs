@@ -21,9 +21,17 @@ pub struct ScrapeState {
     pub chats_scraped: usize,
     pub stories_scraped: usize,
     pub purchases_scraped: usize,
+    pub highlights_scraped: usize,
     pub files_downloaded: usize,
     pub files_failed: usize,
     pub active_downloads: HashMap<u64, ActiveDownload>,
+    /// Incremented synchronously the moment a download task is queued
+    /// (before `tokio::spawn` even returns) and decremented when that task
+    /// finishes. `active_downloads` alone isn't enough to know when
+    /// everything is done — a just-spawned task hasn't inserted itself
+    /// into that map yet, so checking only `active_downloads.is_empty()`
+    /// can report "done" while downloads are still about to start.
+    pub pending_downloads: usize,
     pub logs: Vec<String>,
     pub download_path: PathBuf,
     pub is_finished: bool,
@@ -39,9 +47,11 @@ impl ScrapeState {
             chats_scraped: 0,
             stories_scraped: 0,
             purchases_scraped: 0,
+            highlights_scraped: 0,
             files_downloaded: 0,
             files_failed: 0,
             active_downloads: HashMap::new(),
+            pending_downloads: 0,
             logs: Vec::new(),
             download_path,
             is_finished: false,

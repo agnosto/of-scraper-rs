@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -22,17 +23,51 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-pub struct ScrapingScreen;
+pub struct ScrapingScreen {
+    /// Guards against pushing `NextActionScreen` more than once — `tick()`
+    /// runs every loop iteration, so without this it would try to push a
+    /// new copy on every single frame after finishing.
+    transitioned: bool,
+    finished_at: Option<Instant>,
+}
 
 impl ScrapingScreen {
     pub fn new() -> Self {
-        Self
+        Self { transitioned: false, finished_at: None }
     }
 }
 
 impl Screen for ScrapingScreen {
+    fn tick(&mut self, shared: &Arc<SharedState>) -> ScreenResult {
+        if self.transitioned {
+            return ScreenResult::Stay;
+        }
+        let is_finished = shared.scrape.lock().unwrap()
+            .as_ref()
+            .map(|s| s.lock().unwrap().is_finished)
+            .unwrap_or(false);
+
+        if is_finished {
+            let finished_at = self.finished_at.get_or_insert_with(Instant::now);
+            if finished_at.elapsed() >= std::time::Duration::from_secs(3) {
+                self.transitioned = true;
+                return ScreenResult::Push(Box::new(crate::tui::screens::next_action::NextActionScreen::new()));
+            }
+        }
+        ScreenResult::Stay
+    }
+
     fn handle_key(&mut self, key: KeyEvent, shared: &Arc<SharedState>) -> ScreenResult {
         if key.code == KeyCode::Char('q') || key.code == KeyCode::Esc {
+            let is_finished = shared.scrape.lock().unwrap()
+                .as_ref()
+                .map(|s| s.lock().unwrap().is_finished)
+                .unwrap_or(true);
+
+            if is_finished {
+                return ScreenResult::Push(Box::new(crate::tui::screens::next_action::NextActionScreen::new()));
+            }
+
             if let Some(scrape) = shared.scrape.lock().unwrap().as_ref() {
                 scrape.lock().unwrap().should_quit = true;
             }
@@ -62,9 +97,9 @@ impl Screen for ScrapingScreen {
         let header_text = format!(
             " OnlyFans Scraper\n\
              Target User: @{} | Status: {}\n\
-             Scraped   : Posts: {} | Chats: {} | Stories: {} | Purchases: {}\n\
+             Scraped   : Posts: {} | Chats: {} | Stories: {} | Purchases: {} | Highlights: {}\n\
              Downloads : Succeeded: {} | Failed: {}",
-            s.username, s.status, s.posts_scraped, s.chats_scraped, s.stories_scraped, s.purchases_scraped, s.files_downloaded, s.files_failed
+            s.username, s.status, s.posts_scraped, s.chats_scraped, s.stories_scraped, s.purchases_scraped, s.highlights_scraped, s.files_downloaded, s.files_failed
         );
         let header = Paragraph::new(header_text)
             .block(Block::default().borders(Borders::ALL).title(" Statistics ").border_style(Style::default().fg(Color::Cyan)));

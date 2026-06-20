@@ -40,6 +40,10 @@ pub fn run_tui(
                 ScreenResult::Pop => {
                     stack.pop();
                 }
+                ScreenResult::Reset(screen) => {
+                    stack.clear();
+                    stack.push(screen);
+                }
                 ScreenResult::Quit => break,
                 ScreenResult::Stay => {}
             }
@@ -65,6 +69,10 @@ pub fn run_tui(
                             if stack.is_empty() {
                                 break;
                             }
+                        }
+                        ScreenResult::Reset(screen) => {
+                            stack.clear();
+                            stack.push(screen);
                         }
                         ScreenResult::Quit => break,
                         ScreenResult::Stay => {}

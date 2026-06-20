@@ -3,6 +3,7 @@ pub mod user_select;
 pub mod content_select;
 pub mod scraping;
 pub mod donate;
+pub mod next_action;
 
 use std::sync::Arc;
 
@@ -19,6 +20,11 @@ pub enum ScreenResult {
     Push(Box<dyn Screen>),
     /// Pop back to whatever was underneath this screen.
     Pop,
+    /// Clear the entire stack and start fresh from the given screen — used
+    /// by the post-scrape "what next" screen so "scrape another creator"
+    /// or "back to menu" don't leave a pile of stale wizard screens
+    /// underneath.
+    Reset(Box<dyn Screen>),
     /// Tear down the whole TUI.
     Quit,
 }

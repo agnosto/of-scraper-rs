@@ -273,8 +273,9 @@ async fn queue_downloads<T>(
     semaphore: &Arc<tokio::sync::Semaphore>,
     state_opt: &Option<Arc<Mutex<ScrapeState>>>,
     content: &T,
-    user: &of_client::user::User,
+    username: &str,
     download_path: &Path,
+    subfolder: Option<&str>,
 ) where
     T: of_client::content::Content + of_client::content::HasMedia<Media = of_client::media::Feed> + Send + Sync + 'static,
 {
@@ -282,7 +283,13 @@ async fn queue_downloads<T>(
     use of_client::media::Media;
 
     let content_type_str = T::content_type().to_string();
-    let content_path = download_path.join(&user.username).join(&content_type_str);
+    let mut content_path = download_path.join(username).join(&content_type_str);
+    if let Some(sub) = subfolder {
+        // Label/highlight titles can contain characters that are awkward
+        // in paths (slashes, etc); keep it simple and just strip those.
+        let sanitized: String = sub.chars().filter(|c| !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')).collect();
+        content_path = content_path.join(sanitized);
+    }
 
     for media in content.media().iter().cloned() {
         let downloader = downloader.clone();
@@ -299,10 +306,19 @@ async fn queue_downloads<T>(
         let media_id = media.id;
         let drm_type_str = content.drm_type_str();
 
+        if let Some(state) = &state_opt {
+            state.lock().unwrap().pending_downloads += 1;
+        }
+
         tokio::spawn(async move {
             let _permit = match semaphore.acquire().await {
                 Ok(p) => p,
-                Err(_) => return,
+                Err(_) => {
+                    if let Some(state) = &state_opt {
+                        state.lock().unwrap().pending_downloads -= 1;
+                    }
+                    return;
+                }
             };
 
             let filename = if let Some(url_str) = media.source() {
@@ -333,6 +349,10 @@ async fn queue_downloads<T>(
                 Ok(_) => log_message(&state_opt, &format!("Successfully downloaded {}", filename)),
                 Err(e) => log_message(&state_opt, &format!("Failed to download {}: {}", filename, e)),
             }
+
+            if let Some(state) = &state_opt {
+                state.lock().unwrap().pending_downloads -= 1;
+            }
         });
     }
 }
@@ -349,18 +369,19 @@ pub async fn run_scrape_engine_tui(
         s.username = username.clone();
     }
     log_message(&Some(state.clone()), &format!("Fetching user @{}...", username));
-    let user = match client.get_user(username.as_str()).await {
-        Ok(u) => u,
+    let user: Option<of_client::user::User> = match client.get_user(username.as_str()).await {
+        Ok(u) => {
+            log_message(&Some(state.clone()), &format!("User found: {} (ID: {})", u.name, u.id));
+            Some(u)
+        }
         Err(e) => {
-            let err_msg = format!("Failed to get user @{}: {}", username, e);
-            log_message(&Some(state.clone()), &err_msg);
-            state.lock().unwrap().status = "Failed".to_string();
-            state.lock().unwrap().is_finished = true;
-            return Err(anyhow!(err_msg));
+            log_message(&Some(state.clone()), &format!(
+                "Could not resolve user @{}: {} (account may be deleted/banned) — skipping id-based content types, will still try purchases if selected",
+                username, e
+            ));
+            None
         }
     };
-
-    log_message(&Some(state.clone()), &format!("User found: {} (ID: {})", user.name, user.id));
 
     let download_path = get_download_path();
     let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
@@ -370,6 +391,10 @@ pub async fn run_scrape_engine_tui(
 
         match t.as_str() {
             "posts" => {
+                let Some(user) = user.as_ref() else {
+                    log_message(&Some(state.clone()), "Skipping posts: user could not be resolved");
+                    continue;
+                };
                 let mut before: Option<DateTime<Utc>> = None;
                 loop {
                     if state.lock().unwrap().should_quit { break; }
@@ -390,7 +415,7 @@ pub async fn run_scrape_engine_tui(
 
                         state.lock().unwrap().posts_scraped += 1;
 
-                        queue_downloads(&downloader, &semaphore, &Some(state.clone()), post, &user, &download_path).await;
+                        queue_downloads(&downloader, &semaphore, &Some(state.clone()), post, &user.username, &download_path, None).await;
 
                         before = Some(post.posted_at);
                         count += 1;
@@ -400,6 +425,10 @@ pub async fn run_scrape_engine_tui(
                 }
             }
             "chats" => {
+                let Some(user) = user.as_ref() else {
+                    log_message(&Some(state.clone()), "Skipping chats: user could not be resolved");
+                    continue;
+                };
                 let mut before_id: Option<u64> = None;
                 loop {
                     if state.lock().unwrap().should_quit { break; }
@@ -420,7 +449,7 @@ pub async fn run_scrape_engine_tui(
 
                         state.lock().unwrap().chats_scraped += 1;
 
-                        queue_downloads(&downloader, &semaphore, &Some(state.clone()), chat, &user, &download_path).await;
+                        queue_downloads(&downloader, &semaphore, &Some(state.clone()), chat, &user.username, &download_path, None).await;
 
                         before_id = Some(chat.id);
                         count += 1;
@@ -430,6 +459,10 @@ pub async fn run_scrape_engine_tui(
                 }
             }
             "stories" => {
+                let Some(user) = user.as_ref() else {
+                    log_message(&Some(state.clone()), "Skipping stories: user could not be resolved");
+                    continue;
+                };
                 if state.lock().unwrap().should_quit { break; }
 
                 state.lock().unwrap().status = "Scraping stories...".to_string();
@@ -440,12 +473,100 @@ pub async fn run_scrape_engine_tui(
 
                             state.lock().unwrap().stories_scraped += 1;
 
-                            queue_downloads(&downloader, &semaphore, &Some(state.clone()), story, &user, &download_path).await;
+                            queue_downloads(&downloader, &semaphore, &Some(state.clone()), story, &user.username, &download_path, None).await;
                         }
                     }
                     Err(e) => {
                         log_message(&Some(state.clone()), &format!("Failed to get stories: {}", e));
                     }
+                }
+            }
+            "highlights" => {
+                let Some(user) = user.as_ref() else {
+                    log_message(&Some(state.clone()), "Skipping highlights: user could not be resolved");
+                    continue;
+                };
+                let mut offset: u64 = 0;
+                loop {
+                    if state.lock().unwrap().should_quit { break; }
+
+                    state.lock().unwrap().status = format!("Scraping highlights (offset: {})...", offset);
+                    let (summaries, has_more) = match client.get_highlights(user.id, offset).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            log_message(&Some(state.clone()), &format!("Failed to get highlights: {}", e));
+                            break;
+                        }
+                    };
+                    if summaries.is_empty() { break; }
+
+                    for summary in &summaries {
+                        if state.lock().unwrap().should_quit { break; }
+
+                        match client.get_highlight(summary.id).await {
+                            Ok(highlight) => {
+                                state.lock().unwrap().highlights_scraped += 1;
+                                queue_downloads(&downloader, &semaphore, &Some(state.clone()), &highlight, &user.username, &download_path, None).await;
+                            }
+                            Err(e) => log_message(&Some(state.clone()), &format!("Failed to get highlight '{}': {}", summary.title, e)),
+                        }
+                    }
+
+                    offset += 5;
+                    if !has_more { break; }
+                }
+            }
+            "labels" => {
+                let Some(user) = user.as_ref() else {
+                    log_message(&Some(state.clone()), "Skipping labels: user could not be resolved");
+                    continue;
+                };
+                let mut label_offset: u64 = 0;
+                loop {
+                    if state.lock().unwrap().should_quit { break; }
+
+                    let (labels, labels_has_more) = match client.get_labels(user.id, label_offset).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            log_message(&Some(state.clone()), &format!("Failed to get labels: {}", e));
+                            break;
+                        }
+                    };
+                    if labels.is_empty() { break; }
+
+                    for label in &labels {
+                        let mut before: Option<DateTime<Utc>> = None;
+                        loop {
+                            if state.lock().unwrap().should_quit { break; }
+
+                            state.lock().unwrap().status = format!("Scraping label '{}' (before: {:?})...", label.name, before);
+                            let posts = match client.get_posts_by_label(user.id, &label.id, before).await {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    log_message(&Some(state.clone()), &format!("Failed to get posts for label '{}': {}", label.name, e));
+                                    break;
+                                }
+                            };
+                            if posts.is_empty() { break; }
+
+                            let mut count = 0;
+                            for post in &posts {
+                                if state.lock().unwrap().should_quit { break; }
+
+                                state.lock().unwrap().posts_scraped += 1;
+
+                                queue_downloads(&downloader, &semaphore, &Some(state.clone()), post, &user.username, &download_path, Some(&label.name)).await;
+
+                                before = Some(post.posted_at);
+                                count += 1;
+                            }
+
+                            if count < 10 { break; }
+                        }
+                    }
+
+                    label_offset += 10;
+                    if !labels_has_more { break; }
                 }
             }
             "purchases" => {
@@ -468,7 +589,7 @@ pub async fn run_scrape_engine_tui(
 
                         state.lock().unwrap().purchases_scraped += 1;
 
-                        queue_downloads(&downloader, &semaphore, &Some(state.clone()), purchase, &user, &download_path).await;
+                        queue_downloads(&downloader, &semaphore, &Some(state.clone()), purchase, &username, &download_path, None).await;
                     }
 
                     offset += 10;
@@ -483,8 +604,8 @@ pub async fn run_scrape_engine_tui(
     log_message(&Some(state.clone()), "Scraping loop finished. Waiting for active downloads to complete...");
 
     loop {
-        let is_empty = state.lock().unwrap().active_downloads.is_empty();
-        if is_empty || state.lock().unwrap().should_quit {
+        let nothing_pending = state.lock().unwrap().pending_downloads == 0;
+        if nothing_pending || state.lock().unwrap().should_quit {
             break;
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -503,8 +624,17 @@ async fn scrape_user_cli(
 ) -> anyhow::Result<()> {
     use of_client::content::Content;
     println!("Scraping @{} for {}...", username, content_type);
-    let user = client.get_user(username).await.map_err(|e| anyhow!("Failed to get user: {}", e))?;
-    println!("User found: {} ({})", user.name, user.id);
+    let user = match client.get_user(username).await {
+        Ok(u) => {
+            println!("User found: {} ({})", u.name, u.id);
+            Some(u)
+        }
+        Err(e) => {
+            println!("Could not resolve user @{}: {} (account may be deleted/banned)", username, e);
+            println!("Will still attempt purchases if that's what was requested.");
+            None
+        }
+    };
 
     let download_path = get_download_path();
     let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
@@ -518,6 +648,7 @@ async fn scrape_user_cli(
     for t in types {
         match t {
             "posts" => {
+                let Some(user) = user.as_ref() else { println!("Skipping posts: user could not be resolved"); continue };
                 let mut before: Option<DateTime<Utc>> = None;
                 loop {
                     let posts = client.get_posts(user.id, before).await.map_err(|e| anyhow!("Failed to get posts: {}", e))?;
@@ -525,7 +656,7 @@ async fn scrape_user_cli(
                     let mut count = 0;
                     for post in &posts {
                         println!("Queueing post media from post {}", post.id);
-                        queue_downloads(&downloader, &semaphore, &None, post, &user, &download_path).await;
+                        queue_downloads(&downloader, &semaphore, &None, post, &user.username, &download_path, None).await;
                         before = Some(post.posted_at);
                         count += 1;
                     }
@@ -533,6 +664,7 @@ async fn scrape_user_cli(
                 }
             }
             "chats" => {
+                let Some(user) = user.as_ref() else { println!("Skipping chats: user could not be resolved"); continue };
                 let mut before_id: Option<u64> = None;
                 loop {
                     let chats = client.get_chats(user.id, before_id).await.map_err(|e| anyhow!("Failed to get chats: {}", e))?;
@@ -540,7 +672,7 @@ async fn scrape_user_cli(
                     let mut count = 0;
                     for chat in &chats {
                         println!("Queueing chat media from message {}", chat.id);
-                        queue_downloads(&downloader, &semaphore, &None, chat, &user, &download_path).await;
+                        queue_downloads(&downloader, &semaphore, &None, chat, &user.username, &download_path, None).await;
                         before_id = Some(chat.id);
                         count += 1;
                     }
@@ -548,14 +680,59 @@ async fn scrape_user_cli(
                 }
             }
             "stories" => {
+                let Some(user) = user.as_ref() else { println!("Skipping stories: user could not be resolved"); continue };
                 println!("Scraping active stories...");
                 match client.get_stories(user.id).await {
                     Ok(stories) => {
                         for story in &stories {
-                            queue_downloads(&downloader, &semaphore, &None, story, &user, &download_path).await;
+                            queue_downloads(&downloader, &semaphore, &None, story, &user.username, &download_path, None).await;
                         }
                     }
                     Err(e) => println!("Failed to get stories: {}", e),
+                }
+            }
+            "highlights" => {
+                let Some(user) = user.as_ref() else { println!("Skipping highlights: user could not be resolved"); continue };
+                let mut offset: u64 = 0;
+                loop {
+                    let (summaries, has_more) = client.get_highlights(user.id, offset).await.map_err(|e| anyhow!("Failed to get highlights: {}", e))?;
+                    if summaries.is_empty() { break; }
+                    for summary in &summaries {
+                        match client.get_highlight(summary.id).await {
+                            Ok(highlight) => {
+                                println!("Queueing highlight '{}'", highlight.title);
+                                queue_downloads(&downloader, &semaphore, &None, &highlight, &user.username, &download_path, None).await;
+                            }
+                            Err(e) => println!("Failed to get highlight '{}': {}", summary.title, e),
+                        }
+                    }
+                    offset += 5;
+                    if !has_more { break; }
+                }
+            }
+            "labels" => {
+                let Some(user) = user.as_ref() else { println!("Skipping labels: user could not be resolved"); continue };
+                let mut label_offset: u64 = 0;
+                loop {
+                    let (labels, labels_has_more) = client.get_labels(user.id, label_offset).await.map_err(|e| anyhow!("Failed to get labels: {}", e))?;
+                    if labels.is_empty() { break; }
+                    for label in &labels {
+                        let mut before: Option<DateTime<Utc>> = None;
+                        loop {
+                            let posts = client.get_posts_by_label(user.id, &label.id, before).await.map_err(|e| anyhow!("Failed to get posts for label '{}': {}", label.name, e))?;
+                            if posts.is_empty() { break; }
+                            let mut count = 0;
+                            for post in &posts {
+                                println!("Queueing post {} from label '{}'", post.id, label.name);
+                                queue_downloads(&downloader, &semaphore, &None, post, &user.username, &download_path, Some(&label.name)).await;
+                                before = Some(post.posted_at);
+                                count += 1;
+                            }
+                            if count < 10 { break; }
+                        }
+                    }
+                    label_offset += 10;
+                    if !labels_has_more { break; }
                 }
             }
             "purchases" => {
@@ -565,7 +742,7 @@ async fn scrape_user_cli(
                     if purchases.is_empty() { break; }
                     for purchase in &purchases {
                         println!("Queueing purchase {}", purchase.id());
-                        queue_downloads(&downloader, &semaphore, &None, purchase, &user, &download_path).await;
+                        queue_downloads(&downloader, &semaphore, &None, purchase, username, &download_path, None).await;
                     }
                     offset += 10;
                     if !has_more { break; }
@@ -604,10 +781,6 @@ async fn main() -> anyhow::Result<()> {
             let download_path = get_download_path();
             let config_path = resolve_config_path("config.conf");
             let cdm = load_cdm();
-            // The downloader no longer holds a baked-in TUI state handle;
-            // each scrape run creates its own ScrapeState (see
-            // tui::screens::content_select) and passes it per-call through
-            // the `Option<Arc<Mutex<ScrapeState>>>` arg, same as before.
             let downloader = Arc::new(downloader::Downloader::new(client.clone(), cdm));
 
             tui::run_tui(client, downloader, download_path, config_path)?;
