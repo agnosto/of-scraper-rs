@@ -1,0 +1,77 @@
+# Auth
+Auth {
+  DisableBrowserAuth = false
+}
+# External Tools
+External {
+  FFmpegPath = ""
+}
+# Download Settings
+Download {
+  Media {
+    DownloadAvatarHeaderPhoto = true
+    DownloadPaidPosts = true
+    DownloadPosts = true
+    DownloadArchived = true
+    DownloadStreams = true
+    DownloadStories = true
+    DownloadHighlights = true
+    DownloadMessages = true
+    DownloadPaidMessages = true
+    DownloadImages = true
+    DownloadVideos = true
+    DownloadAudios = true
+  }
+  IgnoreOwnMessages = false
+  DownloadPostsIncrementally = false
+  BypassContentForCreatorsWhoNoLongerExist = false
+  DownloadDuplicatedMedia = false
+  SkipAds = false
+  DownloadPath = ""
+  DownloadOnlySpecificDates = false
+  DownloadDateSelection = "before"
+  CustomDate = ""
+  ShowScrapeSize = false
+  DisableTextSanitization = false
+  DownloadVideoResolution = "source"
+}
+# File Settings
+File {
+  PaidPostFileNameFormat = ""
+  PostFileNameFormat = ""
+  PaidMessageFileNameFormat = ""
+  MessageFileNameFormat = ""
+  RenameExistingFilesWhenCustomFormatIsSelected = false
+}
+# Creator-Specific Configurations
+CreatorConfigs {
+}
+# Folder Settings
+Folder {
+  FolderPerPaidPost = false
+  FolderPerPost = false
+  FolderPerPaidMessage = false
+  FolderPerMessage = false
+}
+# Subscription Settings
+Subscriptions {
+  IncludeExpiredSubscriptions = false
+  IncludeRestrictedSubscriptions = false
+  IgnoredUsersListName = ""
+}
+# Interaction Settings
+Interaction {
+  NonInteractiveMode = false
+  NonInteractiveModeListName = ""
+  NonInteractiveModePurchasedTab = false
+}
+# Performance Settings
+Performance {
+  Timeout = -1
+  LimitDownloadRate = false
+  DownloadLimitInMbPerSec = 4
+}
+# Logging/Debug Settings
+Logging {
+  LoggingLevel = "error"
+}
