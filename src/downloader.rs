@@ -8,15 +8,16 @@ use httpdate::{fmt_http_date, parse_http_date};
 use reqwest::header::{self, HeaderValue, IF_MODIFIED_SINCE};
 use ffmpeg_sidecar::{command::FfmpegCommand, event::{FfmpegEvent, LogLevel}, log_parser::FfmpegLogParser};
 
+use crate::tui::app::{ActiveDownload, ScrapeState};
+
 pub struct Downloader {
     client: OFClient,
     device: Option<Cdm>,
-    state: Option<Arc<std::sync::Mutex<crate::AppState>>>,
 }
 
 impl Downloader {
-    pub fn new(client: OFClient, device: Option<Cdm>, state: Option<Arc<std::sync::Mutex<crate::AppState>>>) -> Self {
-        Self { client, device, state }
+    pub fn new(client: OFClient, device: Option<Cdm>) -> Self {
+        Self { client, device }
     }
 
     pub async fn download_media(&self, media: &Feed, path: &Path) -> anyhow::Result<()> {
@@ -28,12 +29,44 @@ impl Downloader {
                 .to_string();
 
             let target_path = path.join(&filename);
-            self.fetch_file(media.id, url, &target_path, &filename).await?;
+            self.fetch_file(media.id, url, &target_path, &filename, None).await?;
+        }
+        Ok(())
+    }
+
+    /// Same as `download_media` but also reports progress into a
+    /// per-scrape `ScrapeState`, if one was supplied for this run.
+    pub async fn download_media_tracked(
+        &self,
+        media: &Feed,
+        path: &Path,
+        state: Option<Arc<std::sync::Mutex<ScrapeState>>>,
+    ) -> anyhow::Result<()> {
+        if let Some(url_str) = media.source() {
+            let url = Url::parse(url_str)?;
+            let filename = url.path_segments()
+                .and_then(|s| s.last())
+                .ok_or_else(|| anyhow!("Filename unknown"))?
+                .to_string();
+
+            let target_path = path.join(&filename);
+            self.fetch_file(media.id, url, &target_path, &filename, state).await?;
         }
         Ok(())
     }
 
     pub async fn download_media_drm(&self, media: &DRM, license_url: &str, path: &Path, media_id: u64) -> anyhow::Result<()> {
+        self.download_media_drm_tracked(media, license_url, path, media_id, None).await
+    }
+
+    pub async fn download_media_drm_tracked(
+        &self,
+        media: &DRM,
+        license_url: &str,
+        path: &Path,
+        media_id: u64,
+        state: Option<Arc<std::sync::Mutex<ScrapeState>>>,
+    ) -> anyhow::Result<()> {
         if self.device.is_none() {
             bail!("DRM device not initialized");
         }
@@ -49,9 +82,9 @@ impl Downloader {
             }
         }
 
-        if let Some(state) = &self.state {
+        if let Some(state) = &state {
             let mut s = state.lock().unwrap();
-            s.active_downloads.insert(media_id, crate::ActiveDownload {
+            s.active_downloads.insert(media_id, ActiveDownload {
                 filename: mpd_data.base_url.clone(),
                 bytes_downloaded: 0,
                 total_bytes: None,
@@ -62,7 +95,7 @@ impl Downloader {
             let key = self.client
                 .get_decryption_key(self.device.as_ref().unwrap(), license_url, mpd_data.pssh)
                 .await?;
-            
+
             let manifest = &media.manifest.dash;
 
             let mut command = FfmpegCommand::new();
@@ -95,7 +128,7 @@ impl Downloader {
             Ok(())
         }).await;
 
-        if let Some(state) = &self.state {
+        if let Some(state) = &state {
             let mut s = state.lock().unwrap();
             s.active_downloads.remove(&media_id);
             if res.is_ok() {
@@ -108,7 +141,14 @@ impl Downloader {
         res
     }
 
-    async fn fetch_file(&self, media_id: u64, url: Url, path: &Path, filename: &str) -> anyhow::Result<()> {
+    async fn fetch_file(
+        &self,
+        media_id: u64,
+        url: Url,
+        path: &Path,
+        filename: &str,
+        state: Option<Arc<std::sync::Mutex<ScrapeState>>>,
+    ) -> anyhow::Result<()> {
         let response = match path.metadata().and_then(|m| m.modified()) {
             Ok(date) => {
                 let res = self.client.get(url.clone())
@@ -130,9 +170,9 @@ impl Downloader {
 
         let total_bytes = response.content_length();
 
-        if let Some(state) = &self.state {
+        if let Some(state) = &state {
             let mut s = state.lock().unwrap();
-            s.active_downloads.insert(media_id, crate::ActiveDownload {
+            s.active_downloads.insert(media_id, ActiveDownload {
                 filename: filename.to_string(),
                 bytes_downloaded: 0,
                 total_bytes,
@@ -142,7 +182,7 @@ impl Downloader {
         let res = self.handle_download(path, modified, || async {
             let temp_path = path.with_extension("temp");
             let mut file = tfs::File::from_std(fs::File::create(&temp_path)?);
-            
+
             use tokio::io::AsyncWriteExt;
             use futures::StreamExt;
             let mut downloaded = 0u64;
@@ -151,8 +191,8 @@ impl Downloader {
                 let chunk = chunk_result?;
                 file.write_all(&chunk).await?;
                 downloaded += chunk.len() as u64;
-                
-                if let Some(state) = &self.state {
+
+                if let Some(state) = &state {
                     if let Some(dl) = state.lock().unwrap().active_downloads.get_mut(&media_id) {
                         dl.bytes_downloaded = downloaded;
                     }
@@ -163,7 +203,7 @@ impl Downloader {
             Ok(())
         }).await;
 
-        if let Some(state) = &self.state {
+        if let Some(state) = &state {
             let mut s = state.lock().unwrap();
             s.active_downloads.remove(&media_id);
             if res.is_ok() {

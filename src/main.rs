@@ -6,11 +6,12 @@ use anyhow::{anyhow, Context};
 use log::*;
 use clap::{Parser, Subcommand};
 use chrono::{DateTime, Utc};
+use dirs;
 
 mod tui;
 mod downloader;
 
-use tui::{AppState, ActiveDownload, log_message, run_tui};
+use tui::app::{log_message, ScrapeState};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -56,49 +57,48 @@ pub struct CustomConfig {
 }
 
 impl CustomConfig {
-    pub fn load(filename: &str) -> std::io::Result<Self> {
+    pub fn load(path: &Path) -> std::io::Result<Self> {
         let mut values = HashMap::new();
-        let content = fs::read_to_string(filename)?;
+        let content = fs::read_to_string(path)?;
         let mut current_block: Vec<String> = Vec::new();
-        
+
         for line in content.lines() {
             let mut line = line.trim();
             if line.is_empty() {
                 continue;
             }
-            
-            // Strip comments
+
             if let Some(pos) = line.find('#') {
                 line = line[..pos].trim();
             }
             if let Some(pos) = line.find("//") {
                 line = line[..pos].trim();
             }
-            
+
             if line.is_empty() {
                 continue;
             }
-            
+
             if line == "}" {
                 current_block.pop();
                 continue;
             }
-            
+
             if line.ends_with('{') {
                 let block_name = line[..line.len() - 1].trim().to_lowercase();
                 current_block.push(block_name);
                 continue;
             }
-            
+
             if line == "{" {
                 continue;
             }
-            
+
             if let Some(pos) = line.find('=') {
                 let key = line[..pos].trim().to_lowercase();
                 let value = line[pos + 1..].trim()
                     .trim_matches(|c| c == '"' || c == '\'');
-                
+
                 let mut full_key = String::new();
                 for block in &current_block {
                     full_key.push_str(block);
@@ -108,26 +108,68 @@ impl CustomConfig {
                 values.insert(full_key, value.to_string());
             }
         }
-        
+
         Ok(Self { values })
     }
-    
+
     pub fn get(&self, section: &str, key: &str) -> Option<&String> {
         let full_key = format!("{}.{}", section.to_lowercase(), key.to_lowercase());
         self.values.get(&full_key)
     }
 }
 
-fn load_auth() -> anyhow::Result<AuthParams> {
-    if Path::new("auth.json").exists() {
-        return load_auth_json();
-    } else if Path::new("config.conf").exists() {
-        return load_config_conf();
+/// Resolve a config-ish filename ("config.conf", "auth.json", "device.wvd")
+/// by checking, in order:
+///   1. The directory the binary itself lives in (legacy behavior).
+///   2. The current working directory (covers `cargo run` from the repo).
+///   3. The OS-standard config dir: `~/.config/of-scraper-rs` on Linux,
+///      `~/Library/Application Support/of-scraper-rs` on macOS,
+///      `%APPDATA%\of-scraper-rs` on Windows.
+/// If none exist yet, returns the OS-standard path so a fresh file gets
+/// created somewhere sensible rather than next to the binary.
+fn resolve_config_path(filename: &str) -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join(filename);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
     }
-    Err(anyhow!("Neither auth.json nor config.conf found"))
+
+    let cwd_candidate = PathBuf::from(filename);
+    if cwd_candidate.exists() {
+        return cwd_candidate;
+    }
+
+    if let Some(config_dir) = dirs::config_dir() {
+        let candidate = config_dir.join("of-scraper-rs").join(filename);
+        if candidate.exists() {
+            return candidate;
+        }
+        return candidate; // doesn't exist yet, but this is where it should live
+    }
+
+    cwd_candidate
 }
 
-fn load_auth_json() -> anyhow::Result<AuthParams> {
+fn load_auth() -> anyhow::Result<AuthParams> {
+    let auth_json = resolve_config_path("auth.json");
+    let config_conf = resolve_config_path("config.conf");
+
+    if auth_json.exists() {
+        return load_auth_json(&auth_json);
+    } else if config_conf.exists() {
+        return load_config_conf(&config_conf);
+    }
+    Err(anyhow!(
+        "Neither auth.json nor config.conf found. Checked next to the binary, the current \
+         directory, and {}",
+        dirs::config_dir().map(|d| d.join("of-scraper-rs").display().to_string()).unwrap_or_default()
+    ))
+}
+
+fn load_auth_json(path: &Path) -> anyhow::Result<AuthParams> {
     #[derive(serde::Deserialize)]
     struct AuthFileInner {
         cookie: String,
@@ -137,7 +179,7 @@ fn load_auth_json() -> anyhow::Result<AuthParams> {
     #[derive(serde::Deserialize)]
     struct AuthFile { auth: AuthFileInner }
 
-    let data = fs::read_to_string("auth.json")?;
+    let data = fs::read_to_string(path)?;
     let parsed: AuthFile = serde_json::from_str(&data)?;
     let inner = parsed.auth;
 
@@ -160,8 +202,8 @@ fn load_auth_json() -> anyhow::Result<AuthParams> {
     })
 }
 
-fn load_config_conf() -> anyhow::Result<AuthParams> {
-    let config = CustomConfig::load("config.conf").map_err(|e| anyhow!("Config load error: {}", e))?;
+fn load_config_conf(path: &Path) -> anyhow::Result<AuthParams> {
+    let config = CustomConfig::load(path).map_err(|e| anyhow!("Config load error: {}", e))?;
 
     let sess = config.get("auth", "sess")
         .cloned()
@@ -178,10 +220,10 @@ fn load_config_conf() -> anyhow::Result<AuthParams> {
 
     let mut store = CookieStore::new(None);
     let url: Url = "https://onlyfans.com".parse().unwrap();
-    
+
     let sess_cookie = Cookie::build(("sess", sess)).domain("onlyfans.com").build();
     let auth_id_cookie = Cookie::build(("auth_id", &auth_id)).domain("onlyfans.com").build();
-    
+
     store.insert_raw(&sess_cookie, &url).map_err(|e| anyhow!("Cookie store error (sess): {}", e))?;
     store.insert_raw(&auth_id_cookie, &url).map_err(|e| anyhow!("Cookie store error (auth_id): {}", e))?;
 
@@ -194,8 +236,9 @@ fn load_config_conf() -> anyhow::Result<AuthParams> {
 }
 
 fn load_cdm() -> Option<of_client::widevine::Cdm> {
-    if Path::new("device.wvd").exists() {
-        match fs::File::open("device.wvd") {
+    let wvd_path = resolve_config_path("device.wvd");
+    if wvd_path.exists() {
+        match fs::File::open(&wvd_path) {
             Ok(file) => {
                 match of_client::widevine::Device::read_wvd(file) {
                     Ok(device) => {
@@ -221,10 +264,13 @@ fn load_cdm() -> Option<of_client::widevine::Cdm> {
 
 fn get_download_path() -> PathBuf {
     let mut path = PathBuf::from("data");
-    if let Ok(config) = CustomConfig::load("config.conf") {
-        if let Some(p) = config.get("download", "downloadpath") {
-            if !p.is_empty() {
-                path = PathBuf::from(p);
+    let config_conf = resolve_config_path("config.conf");
+    if config_conf.exists() {
+        if let Ok(config) = CustomConfig::load(&config_conf) {
+            if let Some(p) = config.get("download", "downloadpath") {
+                if !p.is_empty() {
+                    path = PathBuf::from(p);
+                }
             }
         }
     }
@@ -234,7 +280,7 @@ fn get_download_path() -> PathBuf {
 async fn queue_downloads<T>(
     downloader: &Arc<downloader::Downloader>,
     semaphore: &Arc<tokio::sync::Semaphore>,
-    state_opt: &Option<Arc<Mutex<AppState>>>,
+    state_opt: &Option<Arc<Mutex<ScrapeState>>>,
     content: &T,
     user: &of_client::user::User,
     download_path: &Path,
@@ -244,10 +290,10 @@ async fn queue_downloads<T>(
     use of_client::content::ContentType;
     use of_client::media::MediaType;
     use of_client::media::Media;
-    
+
     let content_type_str = T::content_type().to_string();
     let content_path = download_path.join(&user.username).join(&content_type_str);
-    
+
     for media in content.media().iter().cloned() {
         let downloader = downloader.clone();
         let semaphore = semaphore.clone();
@@ -257,18 +303,18 @@ async fn queue_downloads<T>(
             MediaType::Audio => "Audios",
             MediaType::Video | MediaType::Gif => "Videos",
         });
-        
+
         let is_drm = media.drm().is_some();
         let content_id = content.id();
         let media_id = media.id;
         let content_type = T::content_type();
-        
+
         tokio::spawn(async move {
             let _permit = match semaphore.acquire().await {
                 Ok(p) => p,
                 Err(_) => return,
             };
-            
+
             let filename = if let Some(url_str) = media.source() {
                 url_str.split('/').last().unwrap_or("file").to_string()
             } else if let Some(_drm) = media.drm() {
@@ -276,9 +322,9 @@ async fn queue_downloads<T>(
             } else {
                 format!("{}", media_id)
             };
-            
+
             log_message(&state_opt, &format!("Starting download of {}", filename));
-            
+
             let res = if is_drm {
                 let type_str = match content_type {
                     ContentType::Chats => "message",
@@ -289,14 +335,14 @@ async fn queue_downloads<T>(
                     media_id, type_str, content_id
                 );
                 if let Some(drm) = media.drm() {
-                    downloader.download_media_drm(drm, &license_url, &path, media_id).await
+                    downloader.download_media_drm_tracked(drm, &license_url, &path, media_id, state_opt.clone()).await
                 } else {
                     Err(anyhow!("DRM manifest missing"))
                 }
             } else {
-                downloader.download_media(&media, &path).await
+                downloader.download_media_tracked(&media, &path, state_opt.clone()).await
             };
-            
+
             match res {
                 Ok(_) => log_message(&state_opt, &format!("Successfully downloaded {}", filename)),
                 Err(e) => log_message(&state_opt, &format!("Failed to download {}: {}", filename, e)),
@@ -310,7 +356,7 @@ pub async fn run_scrape_engine_tui(
     downloader: Arc<downloader::Downloader>,
     username: String,
     content_types: Vec<String>,
-    state: Arc<Mutex<AppState>>,
+    state: Arc<Mutex<ScrapeState>>,
 ) -> anyhow::Result<()> {
     {
         let mut s = state.lock().unwrap();
@@ -327,21 +373,21 @@ pub async fn run_scrape_engine_tui(
             return Err(anyhow!(err_msg));
         }
     };
-    
+
     log_message(&Some(state.clone()), &format!("User found: {} (ID: {})", user.name, user.id));
-    
+
     let download_path = get_download_path();
     let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
-    
+
     for t in &content_types {
         if state.lock().unwrap().should_quit { break; }
-        
+
         match t.as_str() {
             "posts" => {
                 let mut before: Option<DateTime<Utc>> = None;
                 loop {
                     if state.lock().unwrap().should_quit { break; }
-                    
+
                     state.lock().unwrap().status = format!("Scraping posts (before: {:?})...", before);
                     let posts = match client.get_posts(user.id, before).await {
                         Ok(p) => p,
@@ -351,19 +397,19 @@ pub async fn run_scrape_engine_tui(
                         }
                     };
                     if posts.is_empty() { break; }
-                    
+
                     let mut count = 0;
                     for post in &posts {
                         if state.lock().unwrap().should_quit { break; }
-                        
+
                         state.lock().unwrap().posts_scraped += 1;
-                        
+
                         queue_downloads(&downloader, &semaphore, &Some(state.clone()), post, &user, &download_path).await;
-                        
+
                         before = Some(post.posted_at);
                         count += 1;
                     }
-                    
+
                     if count < 10 { break; }
                 }
             }
@@ -371,7 +417,7 @@ pub async fn run_scrape_engine_tui(
                 let mut before_id: Option<u64> = None;
                 loop {
                     if state.lock().unwrap().should_quit { break; }
-                    
+
                     state.lock().unwrap().status = format!("Scraping chats (before_id: {:?})...", before_id);
                     let chats = match client.get_chats(user.id, before_id).await {
                         Ok(c) => c,
@@ -381,33 +427,33 @@ pub async fn run_scrape_engine_tui(
                         }
                     };
                     if chats.is_empty() { break; }
-                    
+
                     let mut count = 0;
                     for chat in &chats {
                         if state.lock().unwrap().should_quit { break; }
-                        
+
                         state.lock().unwrap().chats_scraped += 1;
-                        
+
                         queue_downloads(&downloader, &semaphore, &Some(state.clone()), chat, &user, &download_path).await;
-                        
+
                         before_id = Some(chat.id);
                         count += 1;
                     }
-                    
+
                     if count < 10 { break; }
                 }
             }
             "stories" => {
                 if state.lock().unwrap().should_quit { break; }
-                
+
                 state.lock().unwrap().status = "Scraping stories...".to_string();
                 match client.get_stories(user.id).await {
                     Ok(stories) => {
                         for story in &stories {
                             if state.lock().unwrap().should_quit { break; }
-                            
+
                             state.lock().unwrap().stories_scraped += 1;
-                            
+
                             queue_downloads(&downloader, &semaphore, &Some(state.clone()), story, &user, &download_path).await;
                         }
                     }
@@ -419,10 +465,10 @@ pub async fn run_scrape_engine_tui(
             _ => log_message(&Some(state.clone()), &format!("Content type '{}' not recognized", t)),
         }
     }
-    
+
     state.lock().unwrap().status = "Finishing downloads...".to_string();
     log_message(&Some(state.clone()), "Scraping loop finished. Waiting for active downloads to complete...");
-    
+
     loop {
         let is_empty = state.lock().unwrap().active_downloads.is_empty();
         if is_empty || state.lock().unwrap().should_quit {
@@ -430,7 +476,7 @@ pub async fn run_scrape_engine_tui(
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
-    
+
     state.lock().unwrap().is_finished = true;
     log_message(&Some(state.clone()), "All operations finished.");
     Ok(())
@@ -445,15 +491,15 @@ async fn scrape_user_cli(
     println!("Scraping @{} for {}...", username, content_type);
     let user = client.get_user(username).await.map_err(|e| anyhow!("Failed to get user: {}", e))?;
     println!("User found: {} ({})", user.name, user.id);
-    
+
     let download_path = get_download_path();
     let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
-    
+
     let types = match content_type {
         "all" => vec!["posts", "chats", "stories"],
         other => vec![other],
     };
-    
+
     for t in types {
         match t {
             "posts" => {
@@ -500,7 +546,7 @@ async fn scrape_user_cli(
             _ => println!("Content type '{}' not recognized", t),
         }
     }
-    
+
     println!("Waiting for active downloads to complete...");
     let _permits = semaphore.acquire_many(4).await?;
     println!("Scraping and downloads completed successfully.");
@@ -513,11 +559,11 @@ async fn main() -> anyhow::Result<()> {
 
     let auth = load_auth().context("Loading authentication")?;
     let client = OFClient::new(auth)?;
-    
+
     match cli.command {
         Some(Commands::Scrape { user, content_type }) => {
             let cdm = load_cdm();
-            let downloader = Arc::new(downloader::Downloader::new(client.clone(), cdm, None));
+            let downloader = Arc::new(downloader::Downloader::new(client.clone(), cdm));
             scrape_user_cli(&client, downloader, &user, &content_type).await?;
         },
         Some(Commands::List) => {
@@ -528,14 +574,17 @@ async fn main() -> anyhow::Result<()> {
         },
         None => {
             let download_path = get_download_path();
-            let state = Arc::new(Mutex::new(AppState::new("".to_string(), download_path)));
-            
+            let config_path = resolve_config_path("config.conf");
             let cdm = load_cdm();
-            let downloader = Arc::new(downloader::Downloader::new(client.clone(), cdm, Some(state.clone())));
-            
-            run_tui(state, client, downloader)?;
+            // The downloader no longer holds a baked-in TUI state handle;
+            // each scrape run creates its own ScrapeState (see
+            // tui::screens::content_select) and passes it per-call through
+            // the `Option<Arc<Mutex<ScrapeState>>>` arg, same as before.
+            let downloader = Arc::new(downloader::Downloader::new(client.clone(), cdm));
+
+            tui::run_tui(client, downloader, download_path, config_path)?;
         }
     }
-    
+
     Ok(())
 }

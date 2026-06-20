@@ -7,6 +7,7 @@ use std::{slice, fmt};
 use futures_util::TryFutureExt;
 use reqwest::IntoUrl;
 use serde::Deserialize;
+use serde_json;
 use chrono::{DateTime, Utc};
 use log::*;
 
@@ -51,12 +52,35 @@ pub struct Post {
 #[serde(rename_all = "camelCase")]
 pub struct Chat {
 	pub id: u64,
+	#[serde(default)]
 	pub text: String,
 	pub price: Option<f32>,
+	#[serde(default)]
+	pub is_free: bool,
+	#[serde(default)]
+	pub from_user: Option<ChatFromUser>,
 	#[serde(default = "Utc::now")]
 	pub created_at: DateTime<Utc>,
 	#[serde(default)]
 	pub media: Vec<media::Feed>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct ChatFromUser {
+	pub id: u64,
+}
+
+/// The real `/chats/{id}/messages` endpoint wraps results in an envelope
+/// (`{"list": [...], "hasMore": bool, ...}`), it's not a bare JSON array —
+/// see the captured response: `get_chats` was deserializing straight into
+/// `Vec<Chat>` and failing to decode every single page.
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct ChatsResponse {
+	#[serde(default)]
+	list: Vec<Chat>,
+	#[serde(default)]
+	has_more: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -196,14 +220,24 @@ impl OFClient {
 	}
 
 	pub async fn get_chats<I: fmt::Display>(&self, user_id: I, before_id: Option<u64>) -> reqwest_middleware::Result<Vec<Chat>> {
-		let mut url = format!("https://onlyfans.com/api2/v2/chats/{user_id}/messages?limit=10");
+		let mut url = format!("https://onlyfans.com/api2/v2/chats/{user_id}/messages?limit=10&order=desc&skip_users=all");
 		if let Some(id) = before_id {
-			url.push_str(&format!("&beforeId={}", id));
+			url.push_str(&format!("&id={}", id));
 		}
-		self.get(url)
-		.send()
-		.and_then(|response| response.json::<Vec<Chat>>().map_err(Into::into))
-		.await
+
+		let response = self.get(url).send().await?;
+		let body = response.text().await.map_err(reqwest_middleware::Error::Reqwest)?;
+
+		match serde_json::from_str::<ChatsResponse>(&body) {
+			Ok(wrapped) => Ok(wrapped.list),
+			Err(e) => {
+				let snippet: String = body.chars().take(2000).collect();
+				error!("Failed to decode chats response ({}): {}", e, snippet);
+				Err(reqwest_middleware::Error::Middleware(
+					anyhow::anyhow!("Failed to decode chats response: {e}")
+				))
+			}
+		}
 	}
 
 	pub async fn get_stories<I: fmt::Display>(&self, user_id: I) -> reqwest_middleware::Result<Vec<Story>> {
