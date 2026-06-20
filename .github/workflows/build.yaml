@@ -7,6 +7,8 @@ on:
 
 jobs:
   build:
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -63,8 +65,3 @@ jobs:
         with:
           files: ${{ matrix.artifact_name }}.zip
 
-  # Pushing a tag like v0.1.0 (matching the version in Cargo.toml, though
-  # nothing enforces that match automatically) creates a GitHub Release
-  # and attaches each platform's zipped bundle to it. A plain manual
-  # workflow_dispatch run still just produces the per-OS artifacts above
-  # without creating a release.
