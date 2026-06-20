@@ -62,9 +62,9 @@ impl Screen for ScrapingScreen {
         let header_text = format!(
             " OnlyFans Scraper\n\
              Target User: @{} | Status: {}\n\
-             Scraped   : Posts: {} | Chats: {} | Stories: {}\n\
+             Scraped   : Posts: {} | Chats: {} | Stories: {} | Purchases: {}\n\
              Downloads : Succeeded: {} | Failed: {}",
-            s.username, s.status, s.posts_scraped, s.chats_scraped, s.stories_scraped, s.files_downloaded, s.files_failed
+            s.username, s.status, s.posts_scraped, s.chats_scraped, s.stories_scraped, s.purchases_scraped, s.files_downloaded, s.files_failed
         );
         let header = Paragraph::new(header_text)
             .block(Block::default().borders(Borders::ALL).title(" Statistics ").border_style(Style::default().fg(Color::Cyan)));

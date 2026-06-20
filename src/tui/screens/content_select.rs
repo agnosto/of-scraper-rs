@@ -20,6 +20,7 @@ impl ContentSelectScreen {
             CheckItem::new("Posts", "posts", true),
             CheckItem::new("Chats / Messages", "chats", true),
             CheckItem::new("Stories", "stories", true),
+            CheckItem::new("Purchased content", "purchases", false),
         ];
         Self { checklist: Checklist::new("Choose what to scrape (Space to toggle):", items) }
     }

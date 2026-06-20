@@ -287,7 +287,6 @@ async fn queue_downloads<T>(
 ) where
     T: of_client::content::Content + of_client::content::HasMedia<Media = of_client::media::Feed> + Send + Sync + 'static,
 {
-    use of_client::content::ContentType;
     use of_client::media::MediaType;
     use of_client::media::Media;
 
@@ -307,7 +306,7 @@ async fn queue_downloads<T>(
         let is_drm = media.drm().is_some();
         let content_id = content.id();
         let media_id = media.id;
-        let content_type = T::content_type();
+        let drm_type_str = content.drm_type_str();
 
         tokio::spawn(async move {
             let _permit = match semaphore.acquire().await {
@@ -326,13 +325,9 @@ async fn queue_downloads<T>(
             log_message(&state_opt, &format!("Starting download of {}", filename));
 
             let res = if is_drm {
-                let type_str = match content_type {
-                    ContentType::Chats => "message",
-                    _ => "post",
-                };
                 let license_url = format!(
                     "https://onlyfans.com/api2/v2/users/media/{}/drm/{}/{}?type=widevine",
-                    media_id, type_str, content_id
+                    media_id, drm_type_str, content_id
                 );
                 if let Some(drm) = media.drm() {
                     downloader.download_media_drm_tracked(drm, &license_url, &path, media_id, state_opt.clone()).await
@@ -462,6 +457,33 @@ pub async fn run_scrape_engine_tui(
                     }
                 }
             }
+            "purchases" => {
+                let mut offset: u64 = 0;
+                loop {
+                    if state.lock().unwrap().should_quit { break; }
+
+                    state.lock().unwrap().status = format!("Scraping purchased content (offset: {})...", offset);
+                    let (purchases, has_more) = match client.get_purchased_content(&username, offset).await {
+                        Ok(p) => p,
+                        Err(e) => {
+                            log_message(&Some(state.clone()), &format!("Failed to get purchased content: {}", e));
+                            break;
+                        }
+                    };
+                    if purchases.is_empty() { break; }
+
+                    for purchase in &purchases {
+                        if state.lock().unwrap().should_quit { break; }
+
+                        state.lock().unwrap().purchases_scraped += 1;
+
+                        queue_downloads(&downloader, &semaphore, &Some(state.clone()), purchase, &user, &download_path).await;
+                    }
+
+                    offset += 10;
+                    if !has_more { break; }
+                }
+            }
             _ => log_message(&Some(state.clone()), &format!("Content type '{}' not recognized", t)),
         }
     }
@@ -488,6 +510,7 @@ async fn scrape_user_cli(
     username: &str,
     content_type: &str,
 ) -> anyhow::Result<()> {
+    use of_client::content::Content;
     println!("Scraping @{} for {}...", username, content_type);
     let user = client.get_user(username).await.map_err(|e| anyhow!("Failed to get user: {}", e))?;
     println!("User found: {} ({})", user.name, user.id);
@@ -497,6 +520,7 @@ async fn scrape_user_cli(
 
     let types = match content_type {
         "all" => vec!["posts", "chats", "stories"],
+        "purchases" => vec!["purchases"],
         other => vec![other],
     };
 
@@ -541,6 +565,19 @@ async fn scrape_user_cli(
                         }
                     }
                     Err(e) => println!("Failed to get stories: {}", e),
+                }
+            }
+            "purchases" => {
+                let mut offset: u64 = 0;
+                loop {
+                    let (purchases, has_more) = client.get_purchased_content(username, offset).await.map_err(|e| anyhow!("Failed to get purchased content: {}", e))?;
+                    if purchases.is_empty() { break; }
+                    for purchase in &purchases {
+                        println!("Queueing purchase {}", purchase.id());
+                        queue_downloads(&downloader, &semaphore, &None, purchase, &user, &download_path).await;
+                    }
+                    offset += 10;
+                    if !has_more { break; }
                 }
             }
             _ => println!("Content type '{}' not recognized", t),
