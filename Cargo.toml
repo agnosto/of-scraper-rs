@@ -48,3 +48,12 @@ futures-util = { workspace = true }
 httpdate = { workspace = true }
 dirs = "6.0.0"
 qrcode = "0.14.1"
+
+
+
+[profile.release]
+strip = true
+lto = true
+opt-level = "s"
+codegen-units = 1
+panic = "abort"
