@@ -25,8 +25,11 @@ enum Commands {
     /// Scrape a user
     Scrape {
         /// Username or User ID
+        ///
+        /// Use ALL_PURCHASES as the user to download purchased content
+        /// from every creator in your account.
         user: String,
-        /// Type of content to scrape (posts, chats, stories, all)
+        /// Type of content to scrape (posts, chats, stories, highlights, labels, purchases, all)
         #[arg(short, long, default_value = "all")]
         content_type: String,
     },
