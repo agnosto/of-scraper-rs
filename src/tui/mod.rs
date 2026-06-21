@@ -20,6 +20,7 @@ pub fn run_tui(
     downloader: Arc<crate::downloader::Downloader>,
     download_path: PathBuf,
     config_path: PathBuf,
+    log_path: PathBuf,
 ) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -28,7 +29,7 @@ pub fn run_tui(
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let shared = Arc::new(SharedState::new(client, downloader, download_path, config_path));
+    let shared = Arc::new(SharedState::new(client, downloader, download_path, config_path, log_path));
     let mut stack: Vec<Box<dyn Screen>> = vec![Box::new(MainMenuScreen::new())];
 
     loop {

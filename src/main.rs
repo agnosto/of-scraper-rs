@@ -43,6 +43,10 @@ enum Commands {
         #[arg(long)]
         unlike: bool,
     },
+    Link {
+        /// The post or message link to download
+        url: String,
+    },
 }
 
 pub struct AuthParams {
@@ -127,6 +131,20 @@ impl CustomConfig {
         let full_key = format!("{}.{}", section.to_lowercase(), key.to_lowercase());
         self.values.get(&full_key)
     }
+}
+
+fn init_file_logging() -> anyhow::Result<PathBuf> {
+    let log_path = resolve_config_path("of-scraper-rs.log");
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
+
+    simplelog::WriteLogger::init(simplelog::LevelFilter::Debug, simplelog::Config::default(), file)
+        .map_err(|e| anyhow!("Failed to initialize logger: {e}"))?;
+
+    info!("=== of-scraper-rs v{} starting ===", env!("CARGO_PKG_VERSION"));
+    Ok(log_path)
 }
 
 fn resolve_config_path(filename: &str) -> PathBuf {
@@ -316,6 +334,16 @@ async fn queue_downloads<T>(
         let content_id = content.id();
         let media_id = media.id;
         let drm_type_str = content.drm_type_str();
+
+        if !is_drm && media.source().is_none() {
+            let msg = format!(
+                "Skipping media {} from content {} ({}): no source URL and not DRM — likely still locked despite appearing in this listing",
+                media_id, content_id, content_type_str
+            );
+            warn!("{}", msg);
+            log_message(&state_opt, &msg);
+            continue;
+        }
 
         if let Some(state) = &state_opt {
             state.lock().unwrap().pending_downloads += 1;
@@ -775,6 +803,105 @@ pub async fn run_like_engine_tui(
     Ok(())
 }
 
+/// What a copied OnlyFans link points at, after parsing.
+enum LinkTarget {
+    /// `https://onlyfans.com/{postId}/{username}`
+    Post { post_id: u64 },
+    /// `https://onlyfans.com/my/chats/chat/{userId}/?firstId={messageId}`
+    Message { user_id: u64, message_id: u64 },
+}
+
+fn parse_content_link(input: &str) -> anyhow::Result<LinkTarget> {
+    let url = Url::parse(input).map_err(|e| anyhow!("Not a valid URL: {e}"))?;
+    let segments: Vec<&str> = url.path_segments().map(|s| s.collect()).unwrap_or_default();
+
+    if let Some(pos) = segments.iter().position(|s| *s == "chat") {
+        if let Some(user_id_str) = segments.get(pos + 1) {
+            if let Ok(user_id) = user_id_str.parse::<u64>() {
+                let message_id: u64 = url.query_pairs()
+                    .find(|(k, _)| k == "firstId")
+                    .map(|(_, v)| v.into_owned())
+                    .ok_or_else(|| anyhow!("Chat link is missing '?firstId=' — needed to identify the message"))?
+                    .parse()
+                    .map_err(|_| anyhow!("Couldn't parse the message id out of '?firstId='"))?;
+                return Ok(LinkTarget::Message { user_id, message_id });
+            }
+        }
+    }
+
+    // Post link: onlyfans.com/{postId}/{username}
+    if let Some(first) = segments.first() {
+        if let Ok(post_id) = first.parse::<u64>() {
+            return Ok(LinkTarget::Post { post_id });
+        }
+    }
+
+    Err(anyhow!(
+        "Couldn't recognize '{}' as a post link (onlyfans.com/{{postId}}/{{username}}) \
+         or a message link (onlyfans.com/my/chats/chat/{{userId}}/?firstId={{messageId}})",
+        input
+    ))
+}
+
+async fn download_link_cli(
+    client: &OFClient,
+    downloader: Arc<downloader::Downloader>,
+    url: &str,
+) -> anyhow::Result<()> {
+    let target = parse_content_link(url)?;
+    let download_path = get_download_path();
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+
+    match target {
+        LinkTarget::Post { post_id } => {
+            println!("Fetching post {post_id}...");
+            let post = client.get_post(post_id).await.map_err(|e| anyhow!("Failed to fetch post: {e}"))?;
+            println!("Post found, author @{} — queueing media", post.author.username);
+            let username = post.author.username.clone();
+            queue_downloads(&downloader, &semaphore, &None, &post, &username, &download_path, None).await;
+        }
+        LinkTarget::Message { user_id, message_id } => {
+            println!("Looking for message {message_id} in chat with user {user_id}...");
+
+            let username = client.get_user(user_id).await
+                .map(|u| u.username)
+                .unwrap_or_else(|_| user_id.to_string());
+
+            const MAX_PAGES: u32 = 200;
+            let mut before_id: Option<u64> = None;
+            let mut found = false;
+
+            for page in 0..MAX_PAGES {
+                let chats = client.get_chats(user_id, before_id).await.map_err(|e| anyhow!("Failed to get chats: {e}"))?;
+                if chats.is_empty() { break; }
+
+                if let Some(chat) = chats.iter().find(|c| c.id == message_id) {
+                    println!("Found message {message_id} on page {} — queueing media", page + 1);
+                    queue_downloads(&downloader, &semaphore, &None, chat, &username, &download_path, None).await;
+                    found = true;
+                    break;
+                }
+
+                before_id = chats.last().map(|c| c.id);
+                if page % 10 == 9 {
+                    println!("...still looking, scanned {} pages so far", page + 1);
+                }
+            }
+
+            if !found {
+                return Err(anyhow!(
+                    "Couldn't find message {message_id} after scanning {MAX_PAGES} pages of chat history"
+                ));
+            }
+        }
+    }
+
+    println!("Waiting for active downloads to complete...");
+    let _permits = semaphore.acquire_many(4).await?;
+    println!("Done.");
+    Ok(())
+}
+
 async fn like_user_cli(
     client: &OFClient,
     username: &str,
@@ -999,9 +1126,17 @@ async fn scrape_user_cli(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let log_path = init_file_logging().context("Setting up logging")?;
+
     let cli = Cli::parse();
 
-    let auth = load_auth().context("Loading authentication")?;
+    let auth = match load_auth().context("Loading authentication") {
+        Ok(a) => a,
+        Err(e) => {
+            error!("Failed to load auth: {:#}", e);
+            return Err(e);
+        }
+    };
     let client = OFClient::new(auth)?;
 
     match cli.command {
@@ -1019,13 +1154,18 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Like { user, content_type, unlike }) => {
             like_user_cli(&client, &user, &content_type, !unlike).await?;
         },
+        Some(Commands::Link { url }) => {
+            let cdm = load_cdm();
+            let downloader = Arc::new(downloader::Downloader::new(client.clone(), cdm));
+            download_link_cli(&client, downloader, &url).await?;
+        },
         None => {
             let download_path = get_download_path();
             let config_path = resolve_config_path("config.conf");
             let cdm = load_cdm();
             let downloader = Arc::new(downloader::Downloader::new(client.clone(), cdm));
 
-            tui::run_tui(client, downloader, download_path, config_path)?;
+            tui::run_tui(client, downloader, download_path, config_path, log_path)?;
         }
     }
 

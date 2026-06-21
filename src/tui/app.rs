@@ -1,5 +1,6 @@
 use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex}};
 
+use log::info;
 use of_client::OFClient;
 
 use crate::downloader::Downloader;
@@ -60,6 +61,7 @@ impl ScrapeState {
     }
 
     pub fn log(&mut self, msg: String) {
+        info!("{}", msg);
         if self.logs.len() > 100 {
             self.logs.remove(0);
         }
@@ -113,6 +115,7 @@ impl LikeState {
     }
 
     pub fn log(&mut self, msg: String) {
+        info!("{}", msg);
         if self.logs.len() > 100 {
             self.logs.remove(0);
         }
@@ -159,6 +162,7 @@ pub struct SharedState {
     pub downloader: Arc<Downloader>,
     pub download_path: PathBuf,
     pub config_path: PathBuf,
+    pub log_path: PathBuf,
 
     /// Cached subscriptions list, fetched once and reused by the picker
     /// screen (and any future "pick a creator" screen).
@@ -177,12 +181,13 @@ pub struct SharedState {
 }
 
 impl SharedState {
-    pub fn new(client: OFClient, downloader: Arc<Downloader>, download_path: PathBuf, config_path: PathBuf) -> Self {
+    pub fn new(client: OFClient, downloader: Arc<Downloader>, download_path: PathBuf, config_path: PathBuf, log_path: PathBuf) -> Self {
         Self {
             client,
             downloader,
             download_path,
             config_path,
+            log_path,
             subscriptions: Mutex::new(LoadState::Loading),
             wizard: Mutex::new(WizardSelections::default()),
             scrape: Mutex::new(None),

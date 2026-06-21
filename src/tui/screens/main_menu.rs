@@ -76,7 +76,7 @@ impl Screen for MainMenuScreen {
     fn render(&mut self, frame: &mut Frame, area: Rect, shared: &Arc<SharedState>) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(7), Constraint::Min(8), Constraint::Length(2)])
+            .constraints([Constraint::Length(7), Constraint::Min(7), Constraint::Length(3)])
             .split(area);
 
         let banner = Paragraph::new(vec![
@@ -135,9 +135,10 @@ impl Screen for MainMenuScreen {
         self.list.render(frame, chunks[1]);
 
         let footer_text = format!(
-            "Repo: {}   |   Config: {}",
+            "Repo: {}   |   Config: {}\nLog: {}",
             GITHUB_REPO,
-            shared.config_path.display()
+            shared.config_path.display(),
+            shared.log_path.display()
         );
         let footer = Paragraph::new(footer_text).style(Style::default().fg(Color::DarkGray));
         frame.render_widget(footer, chunks[2]);
