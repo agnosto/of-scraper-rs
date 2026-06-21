@@ -4,6 +4,9 @@ pub mod content_select;
 pub mod scraping;
 pub mod donate;
 pub mod next_action;
+pub mod like_options;
+pub mod like_direction;
+pub mod liking;
 
 use std::sync::Arc;
 

@@ -75,6 +75,55 @@ pub fn log_message(state: &Option<Arc<Mutex<ScrapeState>>>, msg: &str) {
     }
 }
 
+/// Live progress/log state for an in-progress like/unlike run. Deliberately
+/// separate from `ScrapeState` rather than reusing it — a like run has no
+/// downloads, no `active_downloads`/`pending_downloads`, and tracks
+/// "liked"/"unliked"/"skipped" counts instead of files.
+pub struct LikeState {
+    pub username: String,
+    pub status: String,
+    pub liking: bool,
+    pub posts_processed: usize,
+    pub chats_processed: usize,
+    pub stories_processed: usize,
+    pub changed: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub logs: Vec<String>,
+    pub is_finished: bool,
+    pub should_quit: bool,
+}
+
+impl LikeState {
+    pub fn new(username: String, liking: bool) -> Self {
+        Self {
+            username,
+            status: "Waiting to start...".to_string(),
+            liking,
+            posts_processed: 0,
+            chats_processed: 0,
+            stories_processed: 0,
+            changed: 0,
+            skipped: 0,
+            failed: 0,
+            logs: Vec::new(),
+            is_finished: false,
+            should_quit: false,
+        }
+    }
+
+    pub fn log(&mut self, msg: String) {
+        if self.logs.len() > 100 {
+            self.logs.remove(0);
+        }
+        self.logs.push(msg);
+    }
+}
+
+pub fn log_like_message(state: &Arc<Mutex<LikeState>>, msg: &str) {
+    state.lock().unwrap().log(msg.to_string());
+}
+
 /// A creator pulled from `client.get_subscriptions()`, trimmed down to
 /// what the picker screen needs.
 #[derive(Clone, Debug)]
@@ -83,10 +132,22 @@ pub struct CreatorEntry {
     pub username: String,
 }
 
+/// Which flow the creator picker should hand off to once a creator is
+/// chosen — added so `UserSelectScreen` can be shared between the scrape
+/// wizard and the like/unlike wizard instead of duplicating the
+/// fuzzy-picker screen for each.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum WizardMode {
+    #[default]
+    Scrape,
+    Like,
+}
+
 /// Selections the wizard screens (user pick -> content-type pick) build up
 /// before the scrape engine is actually launched.
 #[derive(Default)]
 pub struct WizardSelections {
+    pub mode: WizardMode,
     pub username: Option<String>,
     pub content_types: Vec<String>,
 }
@@ -109,6 +170,9 @@ pub struct SharedState {
     /// scraping screen reads/renders out of this.
     pub scrape: Mutex<Option<Arc<Mutex<ScrapeState>>>>,
 
+    /// Same idea as `scrape`, but for an in-progress like/unlike run.
+    pub like: Mutex<Option<Arc<Mutex<LikeState>>>>,
+
     pub should_quit: Mutex<bool>,
 }
 
@@ -122,6 +186,7 @@ impl SharedState {
             subscriptions: Mutex::new(LoadState::Loading),
             wizard: Mutex::new(WizardSelections::default()),
             scrape: Mutex::new(None),
+            like: Mutex::new(None),
             should_quit: Mutex::new(false),
         }
     }

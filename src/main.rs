@@ -11,7 +11,7 @@ use dirs;
 mod tui;
 mod downloader;
 
-use tui::app::{log_message, ScrapeState};
+use tui::app::{log_message, ScrapeState, LikeState, log_like_message};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -32,6 +32,17 @@ enum Commands {
     },
     /// List subscriptions
     List,
+    /// Like or unlike all of a creator's content
+    Like {
+        /// Username or User ID
+        user: String,
+        /// Type of content to affect (posts, chats, stories, all)
+        #[arg(short, long, default_value = "posts")]
+        content_type: String,
+        /// Unlike instead of like
+        #[arg(long)]
+        unlike: bool,
+    },
 }
 
 pub struct AuthParams {
@@ -616,6 +627,234 @@ pub async fn run_scrape_engine_tui(
     Ok(())
 }
 
+const LIKE_REQUEST_DELAY: std::time::Duration = std::time::Duration::from_millis(800);
+
+async fn apply_like<T: of_client::content::CanLike>(client: &OFClient, content: &T, liking: bool) -> of_client::reqwest_middleware::Result<bool> {
+    let result = client.set_liked(content, liking).await;
+    if !matches!(result, Ok(false)) {
+        tokio::time::sleep(LIKE_REQUEST_DELAY).await;
+    }
+    result
+}
+
+pub async fn run_like_engine_tui(
+    client: OFClient,
+    username: String,
+    content_types: Vec<String>,
+    liking: bool,
+    state: Arc<Mutex<LikeState>>,
+) -> anyhow::Result<()> {
+    use of_client::content::CanLike;
+
+    let action = if liking { "Liking" } else { "Unliking" };
+    log_like_message(&state, &format!("Fetching user @{}...", username));
+    let user = match client.get_user(username.as_str()).await {
+        Ok(u) => u,
+        Err(e) => {
+            let msg = format!("Failed to resolve user @{}: {} — cannot like/unlike without a numeric user id", username, e);
+            log_like_message(&state, &msg);
+            state.lock().unwrap().status = "Failed".to_string();
+            state.lock().unwrap().is_finished = true;
+            return Err(anyhow!(msg));
+        }
+    };
+    log_like_message(&state, &format!("User found: {} (ID: {})", user.name, user.id));
+
+    for t in &content_types {
+        if state.lock().unwrap().should_quit { break; }
+
+        match t.as_str() {
+            "posts" => {
+                let mut before: Option<DateTime<Utc>> = None;
+                loop {
+                    if state.lock().unwrap().should_quit { break; }
+
+                    state.lock().unwrap().status = format!("{} posts (before: {:?})...", action, before);
+                    let posts = match client.get_posts(user.id, before).await {
+                        Ok(p) => p,
+                        Err(e) => {
+                            log_like_message(&state, &format!("Failed to get posts: {}", e));
+                            break;
+                        }
+                    };
+                    if posts.is_empty() { break; }
+
+                    let mut count = 0;
+                    for post in &posts {
+                        if state.lock().unwrap().should_quit { break; }
+                        state.lock().unwrap().posts_processed += 1;
+
+                        match apply_like(&client, post, liking).await {
+                            Ok(true) => {
+                                state.lock().unwrap().changed += 1;
+                                log_like_message(&state, &format!("{} post {}", if liking { "Liked" } else { "Unliked" }, post.id));
+                            }
+                            Ok(false) => { state.lock().unwrap().skipped += 1; }
+                            Err(e) => {
+                                state.lock().unwrap().failed += 1;
+                                log_like_message(&state, &format!("Failed to update post {}: {}", post.id, e));
+                            }
+                        }
+
+                        before = Some(post.posted_at);
+                        count += 1;
+                    }
+
+                    if count < 10 { break; }
+                }
+            }
+            "chats" => {
+                let mut before_id: Option<u64> = None;
+                loop {
+                    if state.lock().unwrap().should_quit { break; }
+
+                    state.lock().unwrap().status = format!("{} chats (before_id: {:?})...", action, before_id);
+                    let chats = match client.get_chats(user.id, before_id).await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            log_like_message(&state, &format!("Failed to get chats: {}", e));
+                            break;
+                        }
+                    };
+                    if chats.is_empty() { break; }
+
+                    let mut count = 0;
+                    for chat in &chats {
+                        if state.lock().unwrap().should_quit { break; }
+                        state.lock().unwrap().chats_processed += 1;
+
+                        match apply_like(&client, chat, liking).await {
+                            Ok(true) => {
+                                state.lock().unwrap().changed += 1;
+                                log_like_message(&state, &format!("{} message {}", if liking { "Liked" } else { "Unliked" }, chat.id));
+                            }
+                            Ok(false) => { state.lock().unwrap().skipped += 1; }
+                            Err(e) => {
+                                state.lock().unwrap().failed += 1;
+                                log_like_message(&state, &format!("Failed to update message {}: {}", chat.id, e));
+                            }
+                        }
+
+                        before_id = Some(chat.id);
+                        count += 1;
+                    }
+
+                    if count < 10 { break; }
+                }
+            }
+            "stories" => {
+                state.lock().unwrap().status = format!("{} stories...", action);
+                match client.get_stories(user.id).await {
+                    Ok(stories) => {
+                        for story in &stories {
+                            if state.lock().unwrap().should_quit { break; }
+                            state.lock().unwrap().stories_processed += 1;
+
+                            match apply_like(&client, story, liking).await {
+                                Ok(true) => {
+                                    state.lock().unwrap().changed += 1;
+                                    log_like_message(&state, &format!("{} story {}", if liking { "Liked" } else { "Unliked" }, story.id));
+                                }
+                                Ok(false) => { state.lock().unwrap().skipped += 1; }
+                                Err(e) => {
+                                    state.lock().unwrap().failed += 1;
+                                    log_like_message(&state, &format!("Failed to update story {}: {}", story.id, e));
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => log_like_message(&state, &format!("Failed to get stories: {}", e)),
+                }
+            }
+            _ => log_like_message(&state, &format!("Content type '{}' not recognized", t)),
+        }
+    }
+
+    state.lock().unwrap().is_finished = true;
+    log_like_message(&state, "All operations finished.");
+    Ok(())
+}
+
+async fn like_user_cli(
+    client: &OFClient,
+    username: &str,
+    content_type: &str,
+    liking: bool,
+) -> anyhow::Result<()> {
+    use of_client::content::CanLike;
+
+    let action = if liking { "Liking" } else { "Unliking" };
+    println!("{} @{}'s {}...", action, username, content_type);
+    let user = client.get_user(username).await.map_err(|e| anyhow!("Failed to get user: {}", e))?;
+    println!("User found: {} ({})", user.name, user.id);
+
+    let types: Vec<&str> = match content_type {
+        "all" => vec!["posts", "chats", "stories"],
+        other => vec![other],
+    };
+
+    let (mut changed, mut skipped, mut failed) = (0u32, 0u32, 0u32);
+
+    for t in types {
+        match t {
+            "posts" => {
+                let mut before: Option<DateTime<Utc>> = None;
+                loop {
+                    let posts = client.get_posts(user.id, before).await.map_err(|e| anyhow!("Failed to get posts: {}", e))?;
+                    if posts.is_empty() { break; }
+                    let mut count = 0;
+                    for post in &posts {
+                        match apply_like(client, post, liking).await {
+                            Ok(true) => { changed += 1; println!("{} post {}", if liking { "Liked" } else { "Unliked" }, post.id); }
+                            Ok(false) => skipped += 1,
+                            Err(e) => { failed += 1; println!("Failed to update post {}: {}", post.id, e); }
+                        }
+                        before = Some(post.posted_at);
+                        count += 1;
+                    }
+                    if count < 10 { break; }
+                }
+            }
+            "chats" => {
+                let mut before_id: Option<u64> = None;
+                loop {
+                    let chats = client.get_chats(user.id, before_id).await.map_err(|e| anyhow!("Failed to get chats: {}", e))?;
+                    if chats.is_empty() { break; }
+                    let mut count = 0;
+                    for chat in &chats {
+                        match apply_like(client, chat, liking).await {
+                            Ok(true) => { changed += 1; println!("{} message {}", if liking { "Liked" } else { "Unliked" }, chat.id); }
+                            Ok(false) => skipped += 1,
+                            Err(e) => { failed += 1; println!("Failed to update message {}: {}", chat.id, e); }
+                        }
+                        before_id = Some(chat.id);
+                        count += 1;
+                    }
+                    if count < 10 { break; }
+                }
+            }
+            "stories" => {
+                match client.get_stories(user.id).await {
+                    Ok(stories) => {
+                        for story in &stories {
+                            match apply_like(client, story, liking).await {
+                                Ok(true) => { changed += 1; println!("{} story {}", if liking { "Liked" } else { "Unliked" }, story.id); }
+                                Ok(false) => skipped += 1,
+                                Err(e) => { failed += 1; println!("Failed to update story {}: {}", story.id, e); }
+                            }
+                        }
+                    }
+                    Err(e) => println!("Failed to get stories: {}", e),
+                }
+            }
+            _ => println!("Content type '{}' not recognized", t),
+        }
+    }
+
+    println!("Done. Changed: {} | Already correct: {} | Failed: {}", changed, skipped, failed);
+    Ok(())
+}
+
 async fn scrape_user_cli(
     client: &OFClient,
     downloader: Arc<downloader::Downloader>,
@@ -776,6 +1015,9 @@ async fn main() -> anyhow::Result<()> {
             for sub in subs {
                 println!("- {} (@{})", sub.name, sub.username);
             }
+        },
+        Some(Commands::Like { user, content_type, unlike }) => {
+            like_user_cli(&client, &user, &content_type, !unlike).await?;
         },
         None => {
             let download_path = get_download_path();

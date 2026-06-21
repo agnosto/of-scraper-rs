@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -28,12 +27,11 @@ pub struct ScrapingScreen {
     /// runs every loop iteration, so without this it would try to push a
     /// new copy on every single frame after finishing.
     transitioned: bool,
-    finished_at: Option<Instant>,
 }
 
 impl ScrapingScreen {
     pub fn new() -> Self {
-        Self { transitioned: false, finished_at: None }
+        Self { transitioned: false }
     }
 }
 
@@ -48,11 +46,8 @@ impl Screen for ScrapingScreen {
             .unwrap_or(false);
 
         if is_finished {
-            let finished_at = self.finished_at.get_or_insert_with(Instant::now);
-            if finished_at.elapsed() >= std::time::Duration::from_secs(3) {
-                self.transitioned = true;
-                return ScreenResult::Push(Box::new(crate::tui::screens::next_action::NextActionScreen::new()));
-            }
+            self.transitioned = true;
+            return ScreenResult::Push(Box::new(crate::tui::screens::next_action::NextActionScreen::new()));
         }
         ScreenResult::Stay
     }

@@ -5,7 +5,7 @@ use deserializers::from_str;
 use crate::{media, user::User, OFClient};
 use std::{slice, fmt};
 use futures_util::TryFutureExt;
-use reqwest::IntoUrl;
+use reqwest::{IntoUrl, Url};
 use serde::Deserialize;
 use serde_json;
 use chrono::{DateTime, Utc};
@@ -48,6 +48,8 @@ pub struct Post {
 	pub author: User,
 	#[serde(default)]
 	can_toggle_favorite: bool,
+	#[serde(default)]
+	pub is_liked: bool,
 	#[serde(default = "Utc::now")]
 	pub posted_at: DateTime<Utc>,
 	#[serde(default)]
@@ -63,6 +65,8 @@ pub struct Chat {
 	pub price: Option<f32>,
 	#[serde(default)]
 	pub is_free: bool,
+	#[serde(default)]
+	pub is_liked: bool,
 	#[serde(default)]
 	pub from_user: Option<ChatFromUser>,
 	#[serde(default = "Utc::now")]
@@ -109,6 +113,8 @@ pub struct Story {
 	pub id: u64,
 	#[serde(default)]
 	pub can_like: bool,
+	#[serde(default)]
+	pub is_liked: bool,
 	#[serde(default = "Utc::now")]
 	pub created_at: DateTime<Utc>,
 	#[serde(default)]
@@ -225,15 +231,14 @@ pub trait Content {
 	fn id(&self) -> u64;
 	fn timestamp(&self) -> DateTime<Utc>; 
 	fn content_type() -> ContentType;
-	/// Used to build DRM license URLs, which need "message" or "post" in
-	/// the path depending on what the content actually is. Matters for
-	/// `Purchase`, which mixes both under one `content_type()`.
 	fn drm_type_str(&self) -> &'static str { "post" }
 }
 
 pub trait CanLike {
 	fn can_like(&self) -> bool;
+	fn is_liked(&self) -> bool;
 	fn like_url(&self) -> impl IntoUrl;
+	fn uses_toggle_endpoint(&self) -> bool { false }
 }
 
 pub trait HasMedia {
@@ -249,7 +254,9 @@ impl Content for Post {
 
 impl CanLike for Post {
 	fn can_like(&self) -> bool { self.can_toggle_favorite }
+	fn is_liked(&self) -> bool { self.is_liked }
 	fn like_url(&self) -> impl IntoUrl { format!("https://onlyfans.com/api2/v2/posts/{}/favorites/{}", self.id, self.author.id) }
+	fn uses_toggle_endpoint(&self) -> bool { true }
 }
 
 impl HasMedia for Post {
@@ -266,6 +273,7 @@ impl Content for Chat {
 
 impl CanLike for Chat {
 	fn can_like(&self) -> bool { true }
+	fn is_liked(&self) -> bool { self.is_liked }
 	fn like_url(&self) -> impl IntoUrl { format!("https://onlyfans.com/api2/v2/messages/{}/like", self.id) }
 }
 
@@ -282,6 +290,7 @@ impl Content for Story {
 
 impl CanLike for Story {
 	fn can_like(&self) -> bool { self.can_like }
+	fn is_liked(&self) -> bool { self.is_liked }
 	fn like_url(&self) -> impl IntoUrl { format!("https://onlyfans.com/api2/v2/stories/{}/like", self.id) }
 }
 
@@ -350,6 +359,37 @@ impl HasMedia for Purchase {
 	}
 }
 
+impl CanLike for Purchase {
+	fn can_like(&self) -> bool {
+		match self {
+			Purchase::Message(c) => c.can_like(),
+			Purchase::Post(p) => p.can_like(),
+		}
+	}
+	fn is_liked(&self) -> bool {
+		match self {
+			Purchase::Message(c) => c.is_liked(),
+			Purchase::Post(p) => p.is_liked(),
+		}
+	}
+	fn like_url(&self) -> impl IntoUrl {
+		match self {
+			Purchase::Message(c) => either_url(c.like_url()),
+			Purchase::Post(p) => either_url(p.like_url()),
+		}
+	}
+	fn uses_toggle_endpoint(&self) -> bool {
+		match self {
+			Purchase::Message(c) => c.uses_toggle_endpoint(),
+			Purchase::Post(p) => p.uses_toggle_endpoint(),
+		}
+	}
+}
+
+fn either_url(u: impl IntoUrl) -> Url {
+	u.into_url().expect("like/unlike urls are always well-formed")
+}
+
 impl OFClient {
 	pub async fn get_post(&self, post_id: u64) -> reqwest_middleware::Result<Post> {
 		self.get(format!("https://onlyfans.com/api2/v2/posts/{post_id}"))
@@ -371,11 +411,6 @@ impl OFClient {
 		.await
 	}
 
-	/// Mirrors what the web client actually sends when scrolling up through
-	/// a chat's history: `order=desc&skip_users=all` plus an `id` cursor set
-	/// to the last message id seen so far (NOT a `beforeId` param, and not
-	/// `beforeId` semantics either — it's literally `id=<that message's id>`
-	/// and the API returns messages older than it).
 	pub async fn get_chats<I: fmt::Display>(&self, user_id: I, before_id: Option<u64>) -> reqwest_middleware::Result<Vec<Chat>> {
 		let mut url = format!("https://onlyfans.com/api2/v2/chats/{user_id}/messages?limit=10&order=desc&skip_users=all");
 		if let Some(id) = before_id {
@@ -407,11 +442,6 @@ impl OFClient {
 		.await
 	}
 
-	/// Purchased content (PPV unlocks: paid posts AND paid chat messages,
-	/// mixed together) for one specific creator. Unlike posts/chats, this
-	/// endpoint paginates with a plain `offset` rather than a cursor id —
-	/// the response itself tells you whether there's more via `hasMore`,
-	/// which is why this returns it instead of inferring from page size.
 	pub async fn get_purchased_content<I: fmt::Display>(&self, author: I, offset: u64) -> reqwest_middleware::Result<(Vec<Purchase>, bool)> {
 		let url = format!(
 			"https://onlyfans.com/api2/v2/posts/paid/all?limit=10&skip_users=all&format=infinite&offset={offset}&author={author}"
@@ -432,9 +462,6 @@ impl OFClient {
 		}
 	}
 
-	/// Lightweight list of a creator's highlight reels. Each entry here is
-	/// just a cover + title — call `get_highlight` per id to actually get
-	/// downloadable media.
 	pub async fn get_highlights<I: fmt::Display>(&self, user_id: I, offset: u64) -> reqwest_middleware::Result<(Vec<HighlightSummary>, bool)> {
 		let url = format!(
 			"https://onlyfans.com/api2/v2/users/{user_id}/stories/highlights?limit=5&offset={offset}&sort=recent%3Adesc"
@@ -454,8 +481,6 @@ impl OFClient {
 		}
 	}
 
-	/// Full contents of one highlight reel, with every contained story's
-	/// media flattened into a single downloadable bundle.
 	pub async fn get_highlight(&self, highlight_id: u64) -> reqwest_middleware::Result<Highlight> {
 		let url = format!("https://onlyfans.com/api2/v2/stories/highlights/{highlight_id}");
 		let response = self.get(url).send().await?;
@@ -476,8 +501,6 @@ impl OFClient {
 		}
 	}
 
-	/// A creator's custom content labels/folders, plus the built-in
-	/// "Archive" pseudo-label (`id: "archived"`).
 	pub async fn get_labels<I: fmt::Display>(&self, user_id: I, offset: u64) -> reqwest_middleware::Result<(Vec<Label>, bool)> {
 		let url = format!("https://onlyfans.com/api2/v2/users/{user_id}/labels?limit=10&offset={offset}&non-empty=1");
 		let response = self.get(url).send().await?;
@@ -524,5 +547,22 @@ impl OFClient {
 				}
 			}
 		}
+	}
+
+	pub async fn set_liked<T: CanLike>(&self, content: &T, like: bool) -> reqwest_middleware::Result<bool> {
+		if content.is_liked() == like {
+			return Ok(false);
+		}
+
+		let url = content.like_url();
+		if content.uses_toggle_endpoint() {
+			self.post(url).send().await?;
+		} else if like {
+			self.post(url).send().await?;
+		} else {
+			self.delete(url).send().await?;
+		}
+
+		Ok(true)
 	}
 }

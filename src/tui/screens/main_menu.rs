@@ -26,6 +26,7 @@ impl MainMenuScreen {
     pub fn new() -> Self {
         let items = vec![
             ListItem::Choice(Choice::new("Scrape content")),
+            ListItem::Choice(Choice::new("Like/Unlike content")),
             ListItem::Separator(None),
             ListItem::Choice(Choice::new("Donate")),
             ListItem::Choice(Choice::new("Quit")),
@@ -49,6 +50,14 @@ impl Screen for MainMenuScreen {
                             // subscriptions fetch before the picker even
                             // renders, so it isn't sitting idle.
                             *shared.wizard.lock().unwrap() = Default::default();
+                            shared.wizard.lock().unwrap().mode = crate::tui::app::WizardMode::Scrape;
+                            ScreenResult::Push(Box::new(
+                                crate::tui::screens::user_select::UserSelectScreen::new(),
+                            ))
+                        }
+                        "Like/Unlike content" => {
+                            *shared.wizard.lock().unwrap() = Default::default();
+                            shared.wizard.lock().unwrap().mode = crate::tui::app::WizardMode::Like;
                             ScreenResult::Push(Box::new(
                                 crate::tui::screens::user_select::UserSelectScreen::new(),
                             ))

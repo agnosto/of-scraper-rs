@@ -73,9 +73,15 @@ impl Screen for UserSelectScreen {
                 WidgetAction::Submit => {
                     if let WidgetResult::SingleSelect(username) = fuzzy.result() {
                         shared.wizard.lock().unwrap().username = Some(username);
-                        return ScreenResult::Push(Box::new(
-                            crate::tui::screens::content_select::ContentSelectScreen::new(),
-                        ));
+                        let mode = shared.wizard.lock().unwrap().mode;
+                        return match mode {
+                            crate::tui::app::WizardMode::Scrape => ScreenResult::Push(Box::new(
+                                crate::tui::screens::content_select::ContentSelectScreen::new(),
+                            )),
+                            crate::tui::app::WizardMode::Like => ScreenResult::Push(Box::new(
+                                crate::tui::screens::like_options::LikeOptionsScreen::new(),
+                            )),
+                        };
                     }
                     ScreenResult::Stay
                 }

@@ -18,11 +18,12 @@ impl NextActionScreen {
     pub fn new() -> Self {
         let items = vec![
             ListItem::Choice(Choice::new("Scrape another creator")),
+            ListItem::Choice(Choice::new("Like/unlike another creator")),
             ListItem::Choice(Choice::new("Return to main menu")),
             ListItem::Separator(None),
             ListItem::Choice(Choice::new("Quit")),
         ];
-        Self { list: ListSelect::new("Scrape finished — what would you like to do next?", items) }
+        Self { list: ListSelect::new("Finished — what would you like to do next?", items) }
     }
 }
 
@@ -35,11 +36,21 @@ impl Screen for NextActionScreen {
                         "Quit" => ScreenResult::Quit,
                         "Scrape another creator" => {
                             *shared.wizard.lock().unwrap() = Default::default();
+                            shared.wizard.lock().unwrap().mode = crate::tui::app::WizardMode::Scrape;
                             *shared.scrape.lock().unwrap() = None;
+                            *shared.like.lock().unwrap() = None;
+                            ScreenResult::Reset(Box::new(crate::tui::screens::user_select::UserSelectScreen::new()))
+                        }
+                        "Like/unlike another creator" => {
+                            *shared.wizard.lock().unwrap() = Default::default();
+                            shared.wizard.lock().unwrap().mode = crate::tui::app::WizardMode::Like;
+                            *shared.scrape.lock().unwrap() = None;
+                            *shared.like.lock().unwrap() = None;
                             ScreenResult::Reset(Box::new(crate::tui::screens::user_select::UserSelectScreen::new()))
                         }
                         "Return to main menu" => {
                             *shared.scrape.lock().unwrap() = None;
+                            *shared.like.lock().unwrap() = None;
                             ScreenResult::Reset(Box::new(crate::tui::screens::main_menu::MainMenuScreen::new()))
                         }
                         _ => ScreenResult::Stay,
@@ -53,6 +64,7 @@ impl Screen for NextActionScreen {
             // this screen should be a deliberate "Quit" pick.
             WidgetAction::Cancel => {
                 *shared.scrape.lock().unwrap() = None;
+                *shared.like.lock().unwrap() = None;
                 ScreenResult::Reset(Box::new(crate::tui::screens::main_menu::MainMenuScreen::new()))
             }
             _ => ScreenResult::Stay,
