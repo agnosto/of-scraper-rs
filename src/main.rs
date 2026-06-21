@@ -305,7 +305,7 @@ async fn queue_downloads<T>(
     username: &str,
     download_path: &Path,
     subfolder: Option<&str>,
-) where
+) -> Vec<tokio::task::JoinHandle<()>> where
     T: of_client::content::Content + of_client::content::HasMedia<Media = of_client::media::Feed> + Send + Sync + 'static,
 {
     use of_client::media::MediaType;
@@ -319,6 +319,8 @@ async fn queue_downloads<T>(
         let sanitized: String = sub.chars().filter(|c| !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')).collect();
         content_path = content_path.join(sanitized);
     }
+
+    let mut handles = Vec::new();
 
     for media in content.media().iter().cloned() {
         let downloader = downloader.clone();
@@ -351,7 +353,7 @@ async fn queue_downloads<T>(
 
         let creator_name = username.to_string();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let _permit = match semaphore.acquire().await {
                 Ok(p) => p,
                 Err(_) => {
@@ -363,7 +365,15 @@ async fn queue_downloads<T>(
             };
 
             let filename = if let Some(url_str) = media.source() {
-                url_str.split('/').last().unwrap_or("file").to_string()
+                //url_str.split('/').last().unwrap_or("file").to_string()
+                if let Ok(url) = Url::parse(url_str) {
+                    url.path_segments()
+                        .and_then(|s| s.last())
+                        .unwrap_or("file")
+                        .to_string()
+                } else {
+                    "file".to_string()
+                }
             } else if let Some(_drm) = media.drm() {
                 format!("{}.mp4", media_id)
             } else {
@@ -395,7 +405,10 @@ async fn queue_downloads<T>(
                 state.lock().unwrap().pending_downloads -= 1;
             }
         });
+
+        handles.push(handle);
     }
+    handles
 }
 
 pub async fn run_scrape_engine_tui(
@@ -897,6 +910,7 @@ async fn download_link_cli(
     let target = parse_content_link(url)?;
     let download_path = get_download_path();
     let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+    let mut tasks = Vec::new();
 
     match target {
         LinkTarget::Post { post_id } => {
@@ -904,7 +918,7 @@ async fn download_link_cli(
             let post = client.get_post(post_id).await.map_err(|e| anyhow!("Failed to fetch post: {e}"))?;
             println!("Post found, author @{} — queueing media", post.author.username);
             let username = post.author.username.clone();
-            queue_downloads(&downloader, &semaphore, &None, &post, &username, &download_path, None).await;
+            tasks.extend(queue_downloads(&downloader, &semaphore, &None, &post, &username, &download_path, None).await);
         }
         LinkTarget::Message { user_id, message_id } => {
             println!("Looking for message {message_id} in chat with user {user_id}...");
@@ -923,7 +937,7 @@ async fn download_link_cli(
 
                 if let Some(chat) = chats.iter().find(|c| c.id == message_id) {
                     println!("Found message {message_id} on page {} — queueing media", page + 1);
-                    queue_downloads(&downloader, &semaphore, &None, chat, &username, &download_path, None).await;
+                    tasks.extend(queue_downloads(&downloader, &semaphore, &None, chat, &username, &download_path, None).await);
                     found = true;
                     break;
                 }
@@ -943,7 +957,10 @@ async fn download_link_cli(
     }
 
     println!("Waiting for active downloads to complete...");
-    let _permits = semaphore.acquire_many(4).await?;
+    //let _permits = semaphore.acquire_many(4).await?;
+    for task in tasks {
+        let _ = task.await;
+    }
     println!("Done.");
     Ok(())
 }
@@ -1040,19 +1057,23 @@ async fn scrape_user_cli(
         println!("Scraping ALL purchased content...");
         let download_path = get_download_path();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+        let mut tasks = Vec::new();
         let mut offset: u64 = 0;
         loop {
             let (purchases, has_more) = client.get_purchased_content::<&str>(None, offset).await.map_err(|e| anyhow!("Failed to get purchased content: {}", e))?;
             if purchases.is_empty() { break; }
             for purchase in &purchases {
                 println!("Queueing purchase {}", purchase.id());
-                queue_downloads(&downloader, &semaphore, &None, purchase, &purchase.author_username(), &download_path, None).await;
+                tasks.extend(queue_downloads(&downloader, &semaphore, &None, purchase, &purchase.author_username(), &download_path, None).await);
             }
             offset += 10;
             if !has_more { break; }
         }
         println!("Waiting for active downloads to complete...");
-        let _permits = semaphore.acquire_many(4).await?;
+        //let _permits = semaphore.acquire_many(4).await?;
+        for task in tasks {
+            let _ = task.await;
+        }
         println!("Scraping and downloads completed successfully.");
         return Ok(());
     }
@@ -1072,6 +1093,7 @@ async fn scrape_user_cli(
 
     let download_path = get_download_path();
     let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+    let mut tasks = Vec::new();
 
     let types = match content_type {
         "all" => vec!["posts", "chats", "stories"],
@@ -1090,7 +1112,7 @@ async fn scrape_user_cli(
                     let mut count = 0;
                     for post in &posts {
                         println!("Queueing post media from post {}", post.id);
-                        queue_downloads(&downloader, &semaphore, &None, post, &user.username, &download_path, None).await;
+                        tasks.extend(queue_downloads(&downloader, &semaphore, &None, post, &user.username, &download_path, None).await);
                         before = Some(post.posted_at);
                         count += 1;
                     }
@@ -1106,7 +1128,7 @@ async fn scrape_user_cli(
                     let mut count = 0;
                     for chat in &chats {
                         println!("Queueing chat media from message {}", chat.id);
-                        queue_downloads(&downloader, &semaphore, &None, chat, &user.username, &download_path, None).await;
+                        tasks.extend(queue_downloads(&downloader, &semaphore, &None, chat, &user.username, &download_path, None).await);
                         before_id = Some(chat.id);
                         count += 1;
                     }
@@ -1119,7 +1141,7 @@ async fn scrape_user_cli(
                 match client.get_stories(user.id).await {
                     Ok(stories) => {
                         for story in &stories {
-                            queue_downloads(&downloader, &semaphore, &None, story, &user.username, &download_path, None).await;
+                            tasks.extend(queue_downloads(&downloader, &semaphore, &None, story, &user.username, &download_path, None).await);
                         }
                     }
                     Err(e) => println!("Failed to get stories: {}", e),
@@ -1135,7 +1157,7 @@ async fn scrape_user_cli(
                         match client.get_highlight(summary.id).await {
                             Ok(highlight) => {
                                 println!("Queueing highlight '{}'", highlight.title);
-                                queue_downloads(&downloader, &semaphore, &None, &highlight, &user.username, &download_path, None).await;
+                                tasks.extend(queue_downloads(&downloader, &semaphore, &None, &highlight, &user.username, &download_path, None).await);
                             }
                             Err(e) => println!("Failed to get highlight '{}': {}", summary.title, e),
                         }
@@ -1158,7 +1180,7 @@ async fn scrape_user_cli(
                             let mut count = 0;
                             for post in &posts {
                                 println!("Queueing post {} from label '{}'", post.id, label.name);
-                                queue_downloads(&downloader, &semaphore, &None, post, &user.username, &download_path, Some(&label.name)).await;
+                                tasks.extend(queue_downloads(&downloader, &semaphore, &None, post, &user.username, &download_path, Some(&label.name)).await);
                                 before = Some(post.posted_at);
                                 count += 1;
                             }
@@ -1176,7 +1198,7 @@ async fn scrape_user_cli(
                     if purchases.is_empty() { break; }
                     for purchase in &purchases {
                         println!("Queueing purchase {}", purchase.id());
-                        queue_downloads(&downloader, &semaphore, &None, purchase, username, &download_path, None).await;
+                        tasks.extend(queue_downloads(&downloader, &semaphore, &None, purchase, username, &download_path, None).await);
                     }
                     offset += 10;
                     if !has_more { break; }
@@ -1187,7 +1209,10 @@ async fn scrape_user_cli(
     }
 
     println!("Waiting for active downloads to complete...");
-    let _permits = semaphore.acquire_many(4).await?;
+    //let _permits = semaphore.acquire_many(4).await?;
+    for task in tasks {
+        let _ = task.await;
+    }
     println!("Scraping and downloads completed successfully.");
     Ok(())
 }
