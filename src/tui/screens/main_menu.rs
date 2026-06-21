@@ -27,6 +27,7 @@ impl MainMenuScreen {
         let items = vec![
             ListItem::Choice(Choice::new("Scrape a specific creator")),
             ListItem::Choice(Choice::new("Scrape ALL purchased content")),
+            ListItem::Choice(Choice::new("Download from link(s)")),
             ListItem::Choice(Choice::new("Like/Unlike content")),
             ListItem::Separator(None),
             ListItem::Choice(Choice::new("Donate")),
@@ -71,6 +72,11 @@ impl Screen for MainMenuScreen {
                             });
                             ScreenResult::Push(Box::new(
                                 crate::tui::screens::scraping::ScrapingScreen::new(),
+                            ))
+                        }
+                        "Download from link(s)" => {
+                            ScreenResult::Push(Box::new(
+                                crate::tui::screens::link_input::LinkInputScreen::new(),
                             ))
                         }
                         "Like/Unlike content" => {

@@ -909,6 +909,89 @@ fn parse_content_link(input: &str) -> anyhow::Result<LinkTarget> {
     ))
 }
 
+pub async fn run_link_download_tui(
+    client: OFClient,
+    downloader: Arc<downloader::Downloader>,
+    urls: Vec<String>,
+    state: Arc<Mutex<ScrapeState>>,
+) -> anyhow::Result<()> {
+    let download_path = get_download_path();
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+    let mut tasks = Vec::new();
+
+    for url_str in urls {
+        if state.lock().unwrap().should_quit { break; }
+        let url_str = url_str.trim();
+        if url_str.is_empty() { continue; }
+
+        log_message(&Some(state.clone()), &format!("Parsing link: {}", url_str));
+        let target = match parse_content_link(url_str) {
+            Ok(t) => t,
+            Err(e) => {
+                log_message(&Some(state.clone()), &format!("Failed to parse link: {}", e));
+                continue;
+            }
+        };
+
+        match target {
+            LinkTarget::Post { post_id } => {
+                log_message(&Some(state.clone()), &format!("Fetching post {}...", post_id));
+                match client.get_post(post_id).await {
+                    Ok(post) => {
+                        let username = post.author.username.clone();
+                        state.lock().unwrap().posts_scraped += 1;
+                        tasks.extend(queue_downloads(&downloader, &semaphore, &Some(state.clone()), &post, &username, &download_path, None).await);
+                    }
+                    Err(e) => log_message(&Some(state.clone()), &format!("Failed to fetch post: {}", e)),
+                }
+            }
+            LinkTarget::Message { user_id, message_id } => {
+                log_message(&Some(state.clone()), &format!("Looking for message {}...", message_id));
+                let username = client.get_user(user_id).await.map(|u| u.username).unwrap_or_else(|_| user_id.to_string());
+                
+                let mut before_id: Option<u64> = None;
+                let mut found = false;
+                for page in 0..200 {
+                    if state.lock().unwrap().should_quit { break; }
+                    let chats = match client.get_chats(user_id, before_id).await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            log_message(&Some(state.clone()), &format!("Failed to get chats: {}", e));
+                            break;
+                        }
+                    };
+                    if chats.is_empty() { break; }
+
+                    if let Some(chat) = chats.iter().find(|c| c.id == message_id) {
+                        state.lock().unwrap().chats_scraped += 1;
+                        tasks.extend(queue_downloads(&downloader, &semaphore, &Some(state.clone()), chat, &username, &download_path, None).await);
+                        found = true;
+                        break;
+                    }
+                    before_id = chats.last().map(|c| c.id);
+                    if page % 10 == 9 {
+                        log_message(&Some(state.clone()), &format!("...still looking, scanned {} pages so far", page + 1));
+                    }
+                }
+                if !found {
+                    log_message(&Some(state.clone()), &format!("Couldn't find message {} in recent history", message_id));
+                }
+            }
+        }
+    }
+
+    state.lock().unwrap().status = "Finishing downloads...".to_string();
+    log_message(&Some(state.clone()), "Waiting for active downloads to complete...");
+    
+    for task in tasks {
+        let _ = task.await;
+    }
+
+    state.lock().unwrap().is_finished = true;
+    log_message(&Some(state.clone()), "All operations finished.");
+    Ok(())
+}
+
 async fn download_link_cli(
     client: &OFClient,
     downloader: Arc<downloader::Downloader>,

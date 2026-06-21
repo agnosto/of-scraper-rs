@@ -7,6 +7,7 @@ pub mod next_action;
 pub mod like_options;
 pub mod like_direction;
 pub mod liking;
+pub mod link_input;
 
 use std::sync::Arc;
 
