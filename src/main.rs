@@ -43,6 +43,10 @@ enum Commands {
         #[arg(long)]
         unlike: bool,
     },
+    /// Download a single post or message from a link, instead of
+    /// scraping a whole creator. Supports two link shapes:
+    /// post — https://onlyfans.com/{postId}/{username}
+    /// message — https://onlyfans.com/my/chats/chat/{userId}/?firstId={messageId}
     Link {
         /// The post or message link to download
         url: String,
