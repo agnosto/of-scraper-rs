@@ -349,6 +349,8 @@ async fn queue_downloads<T>(
             state.lock().unwrap().pending_downloads += 1;
         }
 
+        let creator_name = username.to_string();
+
         tokio::spawn(async move {
             let _permit = match semaphore.acquire().await {
                 Ok(p) => p,
@@ -376,12 +378,12 @@ async fn queue_downloads<T>(
                     media_id, drm_type_str, content_id
                 );
                 if let Some(drm) = media.drm() {
-                    downloader.download_media_drm_tracked(drm, &license_url, &path, media_id, state_opt.clone()).await
+                    downloader.download_media_drm_tracked(drm, &license_url, &path, media_id, state_opt.clone(), creator_name).await
                 } else {
                     Err(anyhow!("DRM manifest missing"))
                 }
             } else {
-                downloader.download_media_tracked(&media, &path, state_opt.clone()).await
+                downloader.download_media_tracked(&media, &path, state_opt.clone(), creator_name).await
             };
 
             match res {
@@ -614,7 +616,7 @@ pub async fn run_scrape_engine_tui(
                     if state.lock().unwrap().should_quit { break; }
 
                     state.lock().unwrap().status = format!("Scraping purchased content (offset: {})...", offset);
-                    let (purchases, has_more) = match client.get_purchased_content(&username, offset).await {
+                    let (purchases, has_more) = match client.get_purchased_content(Some(&username), offset).await {
                         Ok(p) => p,
                         Err(e) => {
                             log_message(&Some(state.clone()), &format!("Failed to get purchased content: {}", e));
@@ -650,6 +652,50 @@ pub async fn run_scrape_engine_tui(
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
 
+    state.lock().unwrap().is_finished = true;
+    log_message(&Some(state.clone()), "All operations finished.");
+    Ok(())
+}
+
+pub async fn run_scrape_all_purchases_tui(
+    client: OFClient,
+    downloader: Arc<downloader::Downloader>,
+    state: Arc<Mutex<ScrapeState>>,
+) -> anyhow::Result<()> {
+    let download_path = get_download_path();
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+    let mut offset: u64 = 0;
+
+    loop {
+        if state.lock().unwrap().should_quit { break; }
+
+        state.lock().unwrap().status = format!("Scraping all purchased content (offset: {})...", offset);
+        let (purchases, has_more) = match client.get_purchased_content::<&str>(None, offset).await {
+            Ok(p) => p,
+            Err(e) => {
+                log_message(&Some(state.clone()), &format!("Failed to get purchased content: {}", e));
+                break;
+            }
+        };
+        if purchases.is_empty() { break; }
+
+        for purchase in &purchases {
+            if state.lock().unwrap().should_quit { break; }
+            state.lock().unwrap().purchases_scraped += 1;
+            let author_username = purchase.author_username();
+            queue_downloads(&downloader, &semaphore, &Some(state.clone()), purchase, &author_username, &download_path, None).await;
+        }
+        offset += 10;
+        if !has_more { break; }
+    }
+
+    state.lock().unwrap().status = "Finishing downloads...".to_string();
+    log_message(&Some(state.clone()), "Scraping loop finished. Waiting for active downloads to complete...");
+    loop {
+        let nothing_pending = state.lock().unwrap().pending_downloads == 0;
+        if nothing_pending || state.lock().unwrap().should_quit { break; }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
     state.lock().unwrap().is_finished = true;
     log_message(&Some(state.clone()), "All operations finished.");
     Ok(())
@@ -989,6 +1035,28 @@ async fn scrape_user_cli(
     content_type: &str,
 ) -> anyhow::Result<()> {
     use of_client::content::Content;
+
+    if username == "ALL_PURCHASES" {
+        println!("Scraping ALL purchased content...");
+        let download_path = get_download_path();
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+        let mut offset: u64 = 0;
+        loop {
+            let (purchases, has_more) = client.get_purchased_content::<&str>(None, offset).await.map_err(|e| anyhow!("Failed to get purchased content: {}", e))?;
+            if purchases.is_empty() { break; }
+            for purchase in &purchases {
+                println!("Queueing purchase {}", purchase.id());
+                queue_downloads(&downloader, &semaphore, &None, purchase, &purchase.author_username(), &download_path, None).await;
+            }
+            offset += 10;
+            if !has_more { break; }
+        }
+        println!("Waiting for active downloads to complete...");
+        let _permits = semaphore.acquire_many(4).await?;
+        println!("Scraping and downloads completed successfully.");
+        return Ok(());
+    }
+
     println!("Scraping @{} for {}...", username, content_type);
     let user = match client.get_user(username).await {
         Ok(u) => {
@@ -1104,7 +1172,7 @@ async fn scrape_user_cli(
             "purchases" => {
                 let mut offset: u64 = 0;
                 loop {
-                    let (purchases, has_more) = client.get_purchased_content(username, offset).await.map_err(|e| anyhow!("Failed to get purchased content: {}", e))?;
+                    let (purchases, has_more) = client.get_purchased_content(Some(username), offset).await.map_err(|e| anyhow!("Failed to get purchased content: {}", e))?;
                     if purchases.is_empty() { break; }
                     for purchase in &purchases {
                         println!("Queueing purchase {}", purchase.id());

@@ -67,16 +67,22 @@ impl OFClient {
 	}
 
 	pub async fn get_subscriptions(&self) -> reqwest_middleware::Result<Vec<User>> {
-		let count = self.get("https://onlyfans.com/api2/v2/subscriptions/count/all")
-		.send()
-		.and_then(|response| response.json::<Subscriptions>().map_err(Into::into))
-		.await
-		.inspect_err(|err| error!("Error reading subscribe counts: {err:?}"))
-		.map(|counts| counts.subscriptions.all)?;
+		let mut all_users = Vec::new();
+		let mut offset: u64 = 0;
+		let limit: u64 = 100;
 
-		self.get(format!("https://onlyfans.com/api2/v2/subscriptions/subscribes?limit={count}&offset=0&type=all"))
-		.send()
-		.and_then(|response| response.json::<Vec<User>>().map_err(Into::into))
-		.await
+		loop {
+			let url = format!("https://onlyfans.com/api2/v2/subscriptions/subscribes?limit={limit}&offset={offset}&type=all");
+			let mut users: Vec<User> = self.get(&url)
+				.send()
+				.and_then(|response| response.json::<Vec<User>>().map_err(Into::into))
+				.await?;
+
+			if users.is_empty() { break; }
+			all_users.append(&mut users);
+
+			offset += limit;
+		}
+		Ok(all_users)
 	}
 }

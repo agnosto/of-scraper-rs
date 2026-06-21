@@ -113,7 +113,7 @@ impl Screen for ScrapingScreen {
             } else {
                 format!("{} / Unknown (DRM/FFmpeg downloading...)", format_size(dl.bytes_downloaded))
             };
-            dl_items.push(ListItem::new(format!("• {}\n  {}", dl.filename, progress_text)));
+            dl_items.push(ListItem::new(format!("• {} - {}\n  {}", dl.creator, dl.filename, progress_text)));
         }
         if dl_items.is_empty() {
             dl_items.push(ListItem::new("No active downloads"));

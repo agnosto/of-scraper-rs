@@ -29,7 +29,7 @@ impl Downloader {
                 .to_string();
 
             let target_path = path.join(&filename);
-            self.fetch_file(media.id, url, &target_path, &filename, None).await?;
+            self.fetch_file(media.id, url, &target_path, &filename, None, String::new()).await?;
         }
         Ok(())
     }
@@ -41,6 +41,7 @@ impl Downloader {
         media: &Feed,
         path: &Path,
         state: Option<Arc<std::sync::Mutex<ScrapeState>>>,
+        creator: String,
     ) -> anyhow::Result<()> {
         if let Some(url_str) = media.source() {
             let url = Url::parse(url_str)?;
@@ -50,13 +51,13 @@ impl Downloader {
                 .to_string();
 
             let target_path = path.join(&filename);
-            self.fetch_file(media.id, url, &target_path, &filename, state).await?;
+            self.fetch_file(media.id, url, &target_path, &filename, state, creator).await?;
         }
         Ok(())
     }
 
     pub async fn download_media_drm(&self, media: &DRM, license_url: &str, path: &Path, media_id: u64) -> anyhow::Result<()> {
-        self.download_media_drm_tracked(media, license_url, path, media_id, None).await
+        self.download_media_drm_tracked(media, license_url, path, media_id, None, String::new()).await
     }
 
     pub async fn download_media_drm_tracked(
@@ -66,6 +67,7 @@ impl Downloader {
         path: &Path,
         media_id: u64,
         state: Option<Arc<std::sync::Mutex<ScrapeState>>>,
+        creator: String,
     ) -> anyhow::Result<()> {
         if self.device.is_none() {
             bail!("DRM device not initialized");
@@ -86,6 +88,7 @@ impl Downloader {
             let mut s = state.lock().unwrap();
             s.active_downloads.insert(media_id, ActiveDownload {
                 filename: mpd_data.base_url.clone(),
+                creator,
                 bytes_downloaded: 0,
                 total_bytes: None,
             });
@@ -148,6 +151,7 @@ impl Downloader {
         path: &Path,
         filename: &str,
         state: Option<Arc<std::sync::Mutex<ScrapeState>>>,
+        creator: String,
     ) -> anyhow::Result<()> {
         let response = match path.metadata().and_then(|m| m.modified()) {
             Ok(date) => {
@@ -174,6 +178,7 @@ impl Downloader {
             let mut s = state.lock().unwrap();
             s.active_downloads.insert(media_id, ActiveDownload {
                 filename: filename.to_string(),
+                creator,
                 bytes_downloaded: 0,
                 total_bytes,
             });

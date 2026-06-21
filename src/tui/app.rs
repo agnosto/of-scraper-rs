@@ -9,6 +9,7 @@ use crate::tui::types::LoadState;
 /// One in-flight download, shown in the "Active Downloads" pane.
 pub struct ActiveDownload {
     pub filename: String,
+    pub creator: String,
     pub bytes_downloaded: u64,
     pub total_bytes: Option<u64>,
 }

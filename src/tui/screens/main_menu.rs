@@ -25,7 +25,8 @@ pub struct MainMenuScreen {
 impl MainMenuScreen {
     pub fn new() -> Self {
         let items = vec![
-            ListItem::Choice(Choice::new("Scrape content")),
+            ListItem::Choice(Choice::new("Scrape a specific creator")),
+            ListItem::Choice(Choice::new("Scrape ALL purchased content")),
             ListItem::Choice(Choice::new("Like/Unlike content")),
             ListItem::Separator(None),
             ListItem::Choice(Choice::new("Donate")),
@@ -45,7 +46,7 @@ impl Screen for MainMenuScreen {
                         "Donate" => ScreenResult::Push(Box::new(
                             crate::tui::screens::donate::DonateScreen::new(),
                         )),
-                        "Scrape content" => {
+                        "Scrape a specific creator" => {
                             // Reset any stale wizard state and kick off the
                             // subscriptions fetch before the picker even
                             // renders, so it isn't sitting idle.
@@ -53,6 +54,23 @@ impl Screen for MainMenuScreen {
                             shared.wizard.lock().unwrap().mode = crate::tui::app::WizardMode::Scrape;
                             ScreenResult::Push(Box::new(
                                 crate::tui::screens::user_select::UserSelectScreen::new(),
+                            ))
+                        }
+                        "Scrape ALL purchased content" => {
+                            *shared.wizard.lock().unwrap() = Default::default();
+                            let scrape_state = Arc::new(std::sync::Mutex::new(crate::tui::app::ScrapeState::new(
+                                "All Purchases".to_string(),
+                                shared.download_path.clone(),
+                            )));
+                            *shared.scrape.lock().unwrap() = Some(scrape_state.clone());
+
+                            let client = shared.client.clone();
+                            let downloader = shared.downloader.clone();
+                            tokio::spawn(async move {
+                                let _ = crate::run_scrape_all_purchases_tui(client, downloader, scrape_state).await;
+                            });
+                            ScreenResult::Push(Box::new(
+                                crate::tui::screens::scraping::ScrapingScreen::new(),
                             ))
                         }
                         "Like/Unlike content" => {

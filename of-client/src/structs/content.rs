@@ -76,8 +76,11 @@ pub struct Chat {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct ChatFromUser {
 	pub id: u64,
+	pub username: Option<String>,
+	pub name: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -87,6 +90,8 @@ struct ChatsResponse {
 	list: Vec<Chat>,
 	#[serde(default)]
 	has_more: bool,
+	#[serde(default)]
+	users: Vec<User>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -98,6 +103,25 @@ pub enum Purchase {
 	Post(Post),
 }
 
+impl Purchase {
+	pub fn author_username(&self) -> String {
+		match self {
+			Purchase::Post(p) => p.author.username.clone(),
+			Purchase::Message(m) => m
+				.from_user
+				.as_ref()
+				.and_then(|u| u.username.clone())
+				.filter(|s| !s.is_empty())
+				.unwrap_or_else(|| {
+					m.from_user
+						.as_ref()
+						.map(|u| u.id.to_string())
+						.unwrap_or_else(|| "unknown_purchases".to_string())
+				}),
+		}
+	}
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct PurchasesResponse {
@@ -105,6 +129,8 @@ struct PurchasesResponse {
 	list: Vec<Purchase>,
 	#[serde(default)]
 	has_more: bool,
+	#[serde(default)]
+	users: Vec<User>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -412,7 +438,7 @@ impl OFClient {
 	}
 
 	pub async fn get_chats<I: fmt::Display>(&self, user_id: I, before_id: Option<u64>) -> reqwest_middleware::Result<Vec<Chat>> {
-		let mut url = format!("https://onlyfans.com/api2/v2/chats/{user_id}/messages?limit=10&order=desc&skip_users=all");
+		let mut url = format!("https://onlyfans.com/api2/v2/chats/{user_id}/messages?limit=10&order=desc");
 		if let Some(id) = before_id {
 			url.push_str(&format!("&id={}", id));
 		}
@@ -421,7 +447,21 @@ impl OFClient {
 		let body = response.text().await.map_err(reqwest_middleware::Error::Reqwest)?;
 
 		match serde_json::from_str::<ChatsResponse>(&body) {
-			Ok(wrapped) => Ok(wrapped.list),
+			//Ok(wrapped) => Ok(wrapped.list),
+			Ok(mut wrapped) => {
+				use std::collections::HashMap;
+				let user_map: HashMap<u64, String> = wrapped.users.into_iter().map(|u| (u.id, u.username)).collect();
+				for chat in &mut wrapped.list {
+					if let Some(from_user) = &mut chat.from_user {
+						if from_user.username.is_none() || from_user.username.as_ref().map_or(true, |s| s.is_empty()) {
+							if let Some(un) = user_map.get(&from_user.id) {
+								from_user.username = Some(un.clone());
+							}
+						}
+					}
+				}
+				Ok(wrapped.list)
+			},
 			Err(e) => {
 				// Dump enough of the raw body to see what actually broke —
 				// "error decoding response body" alone tells us nothing.
@@ -442,16 +482,35 @@ impl OFClient {
 		.await
 	}
 
-	pub async fn get_purchased_content<I: fmt::Display>(&self, author: I, offset: u64) -> reqwest_middleware::Result<(Vec<Purchase>, bool)> {
-		let url = format!(
-			"https://onlyfans.com/api2/v2/posts/paid/all?limit=10&skip_users=all&format=infinite&offset={offset}&author={author}"
+	pub async fn get_purchased_content<I: fmt::Display>(&self, author: Option<I>, offset: u64) -> reqwest_middleware::Result<(Vec<Purchase>, bool)> {
+		let mut url = format!(
+			"https://onlyfans.com/api2/v2/posts/paid/all?limit=10&format=infinite&offset={offset}"
 		);
+		if let Some(a) = author {
+			url.push_str(&format!("&author={}", a));
+		}
 
 		let response = self.get(url).send().await?;
 		let body = response.text().await.map_err(reqwest_middleware::Error::Reqwest)?;
 
 		match serde_json::from_str::<PurchasesResponse>(&body) {
-			Ok(wrapped) => Ok((wrapped.list, wrapped.has_more)),
+			//Ok(wrapped) => Ok((wrapped.list, wrapped.has_more)),
+			Ok(mut wrapped) => {
+				use std::collections::HashMap;
+				let user_map: HashMap<u64, String> = wrapped.users.into_iter().map(|u| (u.id, u.username)).collect();
+				for purchase in &mut wrapped.list {
+					if let Purchase::Message(m) = purchase {
+						if let Some(from_user) = &mut m.from_user {
+							if from_user.username.is_none() || from_user.username.as_ref().map_or(true, |s| s.is_empty()) {
+								if let Some(un) = user_map.get(&from_user.id) {
+									from_user.username = Some(un.clone());
+								}
+							}
+						}
+					}
+				}
+				Ok((wrapped.list, wrapped.has_more))
+			},
 			Err(e) => {
 				let snippet: String = body.chars().take(2000).collect();
 				error!("Failed to decode purchases response ({}): {}", e, snippet);
