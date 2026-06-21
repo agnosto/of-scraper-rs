@@ -6,7 +6,7 @@ pub mod widgets;
 use std::{io, path::PathBuf, sync::Arc, time::Duration};
 
 use crossterm::{
-    event::{self, Event},
+    event::{self, Event, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -61,6 +61,7 @@ pub fn run_tui(
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
                 if let Some(top) = stack.last_mut() {
                     match top.handle_key(key, &shared) {
                         ScreenResult::Push(screen) => stack.push(screen),
@@ -77,6 +78,7 @@ pub fn run_tui(
                         ScreenResult::Quit => break,
                         ScreenResult::Stay => {}
                     }
+                }
                 }
             }
         }
