@@ -1,6 +1,9 @@
 # Auth
+# Only read when auth.json is missing. Fill these in to use config.conf as
+# your auth source (Sess/Auth_Id come out of the "sess=" / "auth_id=" crumbs
+# of your browser's Cookie header).
 Auth {
-  DisableBrowserAuth = false
+  DisableBrowserAuth = false # no-op: this scraper has no browser-auth flow
   Sess = ""
   Auth_Id = ""
   User_Agent = ""
@@ -8,50 +11,63 @@ Auth {
 }
 # External Tools
 External {
+  # Path to an ffmpeg binary for DRM downloads. Leave blank to use the
+  # ffmpeg found on your PATH.
   FFmpegPath = ""
 }
 # Download Settings
 Download {
   Media {
-    DownloadAvatarHeaderPhoto = true
-    DownloadPaidPosts = true
-    DownloadPosts = true
-    DownloadArchived = true
-    DownloadStreams = true
-    DownloadStories = true
-    DownloadHighlights = true
-    DownloadMessages = true
-    DownloadPaidMessages = true
-    DownloadImages = true
-    DownloadVideos = true
-    DownloadAudios = true
+    # All of these act as hard filters: false skips that content/media even
+    # if you selected it in the TUI/CLI. Default true = leave it to your
+    # per-run selection.
+    DownloadAvatarHeaderPhoto = true # no-op: avatar/header download not implemented
+    DownloadPaidPosts = true        # false = skip PPV posts
+    DownloadPosts = true            # false = skip free posts
+    DownloadArchived = true         # false = skip the built-in "Archive" label
+    DownloadStreams = true          # no-op: live streams not implemented
+    DownloadStories = true          # false = skip stories entirely
+    DownloadHighlights = true       # false = skip highlights entirely
+    DownloadMessages = true         # false = skip free messages
+    DownloadPaidMessages = true     # false = skip paid (PPV) messages
+    DownloadImages = true           # false = skip all images
+    DownloadVideos = true           # false = skip all videos (incl. GIFs)
+    DownloadAudios = true           # false = skip all audio
   }
-  IgnoreOwnMessages = false
-  DownloadPostsIncrementally = false
-  BypassContentForCreatorsWhoNoLongerExist = false
-  DownloadDuplicatedMedia = false
-  SkipAds = false
-  DownloadPath = ""
-  DownloadOnlySpecificDates = false
-  DownloadDateSelection = "before"
-  CustomDate = ""
-  ShowScrapeSize = false
-  DisableTextSanitization = false
-  DownloadVideoResolution = "source"
+  IgnoreOwnMessages = false         # true = skip messages you sent (by your auth_id)
+  DownloadPostsIncrementally = false # no-op: needs a state DB, not implemented
+  BypassContentForCreatorsWhoNoLongerExist = false # no-op: purchases already work for deleted accounts
+  DownloadDuplicatedMedia = false   # false = skip media whose id was already downloaded this run
+  SkipAds = false                   # true = skip posts/messages containing #ad or free-trial links
+  DownloadPath = ""                 # where content is saved; blank = ./data
+  DownloadOnlySpecificDates = false # true = only download posts around CustomDate
+  DownloadDateSelection = "before"  # "before" | "after" (needs DownloadOnlySpecificDates)
+  CustomDate = ""                   # yyyy-mm-dd cutoff for the above
+  ShowScrapeSize = false            # no-op: size estimation not implemented
+  DisableTextSanitization = false   # true = keep raw {text} in custom filenames
+  DownloadVideoResolution = "source" # no-op: only source resolution is available
 }
 # File Settings
 File {
+  # Custom filenames for downloaded media. Placeholders (case-insensitive):
+  # {id} {postedAt|createdAt} {mediaId} {mediaCreatedAt} {filename}
+  # {username} {text} {rawText}. Leave blank to keep the original filename.
+  # Examples:
+  #   PostFileNameFormat = "{id}_{mediaId}_{filename}"
+  #   MessageFileNameFormat = "{createdAt}_{username}_{text}"
   PaidPostFileNameFormat = ""
   PostFileNameFormat = ""
   PaidMessageFileNameFormat = ""
   MessageFileNameFormat = ""
-  RenameExistingFilesWhenCustomFormatIsSelected = false
+  RenameExistingFilesWhenCustomFormatIsSelected = false # true = migrate files already saved under the default name
 }
 # Creator-Specific Configurations
 CreatorConfigs {
+  # no-op: per-creator overrides not implemented yet
 }
 # Folder Settings
 Folder {
+  # true = put each post/message's media in its own "<date>_<id>" subfolder
   FolderPerPaidPost = false
   FolderPerPost = false
   FolderPerPaidMessage = false
@@ -59,23 +75,23 @@ Folder {
 }
 # Subscription Settings
 Subscriptions {
-  IncludeExpiredSubscriptions = false
-  IncludeRestrictedSubscriptions = false
-  IgnoredUsersListName = ""
+  IncludeExpiredSubscriptions = false # true = also list expired subs in the picker / `list`
+  IncludeRestrictedSubscriptions = false # true = also list restricted subs
+  IgnoredUsersListName = "" # no-op: list-based ignoring not implemented
 }
 # Interaction Settings
 Interaction {
-  NonInteractiveMode = false
+  NonInteractiveMode = false # no-op: batch/non-interactive mode not implemented
   NonInteractiveModeListName = ""
   NonInteractiveModePurchasedTab = false
 }
 # Performance Settings
 Performance {
-  Timeout = -1
-  LimitDownloadRate = false
-  DownloadLimitInMbPerSec = 4
+  Timeout = -1                    # per-request HTTP timeout in seconds; -1 = default
+  LimitDownloadRate = false       # true = cap download speed below
+  DownloadLimitInMbPerSec = 4     # cap used when LimitDownloadRate is true
 }
 # Logging/Debug Settings
 Logging {
-  LoggingLevel = "error"
+  LoggingLevel = "error"          # off|error|warn|info|debug|trace (file log)
 }

@@ -205,7 +205,14 @@ impl SharedState {
     pub fn spawn_fetch_subscriptions(self_arc: &Arc<SharedState>) {
         let shared = self_arc.clone();
         tokio::spawn(async move {
-            let result = shared.client.get_subscriptions().await;
+            let cfg = crate::config::config();
+            let result = shared
+                .client
+                .get_subscriptions_filtered(
+                    cfg.subscriptions.include_expired_subscriptions,
+                    cfg.subscriptions.include_restricted_subscriptions,
+                )
+                .await;
             let mut slot = shared.subscriptions.lock().unwrap();
             match result {
                 Ok(subs) => {

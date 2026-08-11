@@ -4,9 +4,7 @@ A Rust CLI/TUI scraper for OnlyFans content, built on the request-signing
 groundwork from [GentleMercenary/Onlyfans-notifications](https://github.com/GentleMercenary/Onlyfans-notifications),
 with a config/auth file layout modeled loosely after the old (now-defunct)
 OFDL tool. The OFDL-style `config.conf` format is kept for familiarity and
-future compatibility, but **most of its keys are not implemented yet** —
-see [Status](#status-what-actually-works) below for exactly what's real
-right now.
+backward compatibility.
 
 ## Setup
 
@@ -139,22 +137,50 @@ since the scraper shells out to it for any DRM downloads:
     key names matter — the parser lowercases keys but doesn't otherwise
     normalize them (`User_Agent` → `user_agent`, not `UserAgent` →
     `useragent`), so renaming them will silently break the fallback.
-    `DisableBrowserAuth` in that same block is unused.
-- **`config.conf`**: only `Download.DownloadPath` and the `Auth{}`
-  fallback fields above are actually read. Everything else in this file —
-  `External{}`, `Download.Media{}` (all the `Download*` booleans),
-  `IgnoreOwnMessages`, `BypassContentForCreatorsWhoNoLongerExist`,
-  `DownloadDuplicatedMedia`, `SkipAds`, `DownloadOnlySpecificDates`,
-  `CustomDate`, `DownloadVideoResolution`, `File{}`, `CreatorConfigs{}`,
-  `Folder{}`, `Subscriptions{}`, `Interaction{}`, `Performance{}`,
-  `Logging{}` — is parsed without error (so the file won't crash the
-  scraper) but **none of it currently changes behavior**. It's there as
-  groundwork to wire up later, not a working feature.
+- **`config.conf`** settings that change behavior (see
+  `config.conf-example` for inline docs on each):
+  - `Download.Media.*` — hard filters on top of your TUI/CLI selection.
+    `DownloadStories=false`/`DownloadHighlights=false` disable those
+    content types; `DownloadPosts`/`DownloadPaidPosts` filter free vs PPV
+    posts (and `DownloadMessages`/`DownloadPaidMessages` the same for
+    messages); `DownloadImages`/`DownloadVideos`/`DownloadAudios` filter by
+    media type everywhere (including purchases); `DownloadArchived=false`
+    skips the built-in "Archive" label.
+  - `Download.IgnoreOwnMessages` — skips messages you sent (matched by
+    your `auth_id`).
+  - `Download.DownloadDuplicatedMedia` — `false` (default) skips media
+    whose id was already queued earlier in the run.
+  - `Download.SkipAds` — skips posts/messages whose text contains `#ad`,
+    `free trial`, or an `onlyfans.com/free` link.
+  - `Download.DownloadOnlySpecificDates` + `DownloadDateSelection` +
+    `CustomDate` — date-range filtering for posts (and label posts).
+  - `Download.DownloadPath` — where content is saved (blank = `./data`).
+  - `Download.DisableTextSanitization` — keep raw `{text}` in custom
+    filenames.
+  - `File.*` — custom filename formats for posts/messages (placeholders:
+    `{id}` `{postedAt|createdAt}` `{mediaId}` `{mediaCreatedAt}`
+    `{filename}` `{username}` `{text}` `{rawText}`), plus
+    `RenameExistingFilesWhenCustomFormatIsSelected` to migrate files saved
+    under the default name.
+  - `Folder.*` — per-post/per-message subfolders (`<date>_<id>`).
+  - `Subscriptions.IncludeExpiredSubscriptions` /
+    `IncludeRestrictedSubscriptions` — include those categories in the TUI
+    picker and `list`.
+  - `External.FFmpegPath` — custom ffmpeg binary for DRM downloads.
+  - `Performance.Timeout` — per-request HTTP timeout in seconds.
+  - `Performance.LimitDownloadRate` + `DownloadLimitInMbPerSec` — throttle
+    downloads.
+  - `Logging.LoggingLevel` — level of the `of-scraper-rs.log` file log.
+  - Still parsed-but-ignored (documented in `config.conf-example`):
+    `DisableBrowserAuth`, `DownloadAvatarHeaderPhoto`, `DownloadStreams`,
+    `DownloadPostsIncrementally`, `BypassContentForCreatorsWhoNoLongerExist`,
+    `ShowScrapeSize`, `DownloadVideoResolution`, `CreatorConfigs{}`,
+    `Subscriptions.IgnoredUsersListName`, `Interaction{}`.
 - **`device.wvd`**: optional Widevine device file for DRM-protected
   content, resolved the same way as the auth/config files. If absent,
   DRM content is simply skipped.
 - **Content types**, picked per-scrape (TUI checklist or
-  `--content-type` CLI flag), not via config toggles:
+  `--content-type` CLI flag):
   - Posts
   - Chats / Messages
   - Stories
@@ -179,24 +205,17 @@ since the scraper shells out to it for any DRM downloads:
 
 ## In progress / not implemented
 
-- Wiring up the rest of `config.conf`: per-content-type download toggles,
-  custom filename formats (`File{}`), per-post/per-message folder
-  structuring (`Folder{}`), date-range filtering
-  (`DownloadOnlySpecificDates`/`CustomDate`), download rate limiting
-  (`Performance{}`), per-creator overrides (`CreatorConfigs{}`),
-  subscription filtering (`Subscriptions{}`), non-interactive/batch mode
-  (`Interaction{}`), and structured log levels (`Logging{}`).
-- `BypassContentForCreatorsWhoNoLongerExist` specifically — purchases
-  already work for deleted accounts regardless of this flag; extending
-  that same bypass to posts/chats/stories (where it's currently blocked
-  on needing a resolved numeric user id) is the next logical step here.
 - Avatar/header photo downloads, live stream recording, notification
   scraping (the underlying API client has the types for these — see
   `ContentType::Streams`/`Notifications` — but nothing in `main.rs`
   scrapes them yet).
-- Date-based/incremental scraping (`DownloadPostsIncrementally`).
-- Ad post filtering (`SkipAds`).
-- Per-creator config overrides.
+- Date-based/incremental scraping (`DownloadPostsIncrementally`), which
+  needs a persistent "what's already downloaded" store.
+- Non-interactive/batch mode (`Interaction{}`), per-creator overrides
+  (`CreatorConfigs{}`), and list-based ignoring
+  (`Subscriptions.IgnoredUsersListName`).
+- `DownloadVideoResolution` (only "source" is available from the API
+  surface this tool uses) and `ShowScrapeSize`.
 
 ## Disclaimer
 

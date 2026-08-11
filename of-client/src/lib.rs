@@ -127,17 +127,25 @@ pub struct OFClient {
 
 impl OFClient {
 	pub fn new<H: Into<RequestHeaders>>(headers: H) -> reqwest::Result<Self> {
+		Self::new_with_timeout(headers, None)
+	}
+
+	/// Build an `OFClient` with an optional per-request timeout. `None`
+	/// leaves reqwest's default behavior (no overall request timeout).
+	pub fn new_with_timeout<H: Into<RequestHeaders>>(headers: H, timeout: Option<std::time::Duration>) -> reqwest::Result<Self> {
 		let headers = headers.into();
 		let cookie = headers.cookie.clone();
 		let headers = Arc::new(SharedRequestHeaders(RwLock::new(headers)));
 
+		let mut builder = reqwest::Client::builder()
+			.cookie_provider(cookie)
+			.gzip(true);
+		if let Some(t) = timeout {
+			builder = builder.timeout(t);
+		}
+
 		Ok(Self {
-			client: ClientBuilder::new(
-				reqwest::Client::builder()
-				.cookie_provider(cookie)
-				.gzip(true)
-				.build()?
-			)
+			client: ClientBuilder::new(builder.build()?)
 			.with_arc(headers.clone())
 			.with(status_error_log_middleware)
 			.build(),

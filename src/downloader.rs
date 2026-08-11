@@ -1,4 +1,4 @@
-use std::{fs, path::Path, sync::Arc, time::SystemTime, iter::from_fn, process};
+use std::{fs, path::{Path, PathBuf}, sync::Arc, time::{Duration, SystemTime}, iter::from_fn, process};
 use of_client::{OFClient, media::{Feed, DRM, Media}, widevine::Cdm};
 use anyhow::{anyhow, bail};
 use reqwest::Url;
@@ -13,11 +13,16 @@ use crate::tui::app::{ActiveDownload, ScrapeState};
 pub struct Downloader {
     client: OFClient,
     device: Option<Cdm>,
+    ffmpeg_path: Option<PathBuf>,
 }
 
 impl Downloader {
     pub fn new(client: OFClient, device: Option<Cdm>) -> Self {
-        Self { client, device }
+        Self::new_with_ffmpeg(client, device, None)
+    }
+
+    pub fn new_with_ffmpeg(client: OFClient, device: Option<Cdm>, ffmpeg_path: Option<PathBuf>) -> Self {
+        Self { client, device, ffmpeg_path }
     }
 
     pub async fn download_media(&self, media: &Feed, path: &Path) -> anyhow::Result<()> {
@@ -36,36 +41,36 @@ impl Downloader {
 
     /// Same as `download_media` but also reports progress into a
     /// per-scrape `ScrapeState`, if one was supplied for this run.
+    /// `filename` is the exact name to save as (custom filename formats
+    /// are resolved by the caller).
     pub async fn download_media_tracked(
         &self,
         media: &Feed,
         path: &Path,
+        filename: &str,
         state: Option<Arc<std::sync::Mutex<ScrapeState>>>,
         creator: String,
     ) -> anyhow::Result<()> {
         if let Some(url_str) = media.source() {
             let url = Url::parse(url_str)?;
-            let filename = url.path_segments()
-                .and_then(|s| s.last())
-                .ok_or_else(|| anyhow!("Filename unknown"))?
-                .to_string();
-
-            let target_path = path.join(&filename);
-            self.fetch_file(media.id, url, &target_path, &filename, state, creator).await?;
+            let target_path = path.join(filename);
+            self.fetch_file(media.id, url, &target_path, filename, state, creator).await?;
         }
         Ok(())
     }
 
-    pub async fn download_media_drm(&self, media: &DRM, license_url: &str, path: &Path, media_id: u64) -> anyhow::Result<()> {
-        self.download_media_drm_tracked(media, license_url, path, media_id, None, String::new()).await
+    pub async fn download_media_drm(&self, media: &DRM, license_url: &str, path: &Path, media_id: u64, filename: &str) -> anyhow::Result<()> {
+        self.download_media_drm_tracked(media, license_url, path, media_id, filename, None, String::new()).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn download_media_drm_tracked(
         &self,
         media: &DRM,
         license_url: &str,
         path: &Path,
         media_id: u64,
+        filename: &str,
         state: Option<Arc<std::sync::Mutex<ScrapeState>>>,
         creator: String,
     ) -> anyhow::Result<()> {
@@ -74,7 +79,7 @@ impl Downloader {
         }
 
         let mpd_data = self.client.get_mpd_data(media).await?;
-        let target_path = path.join(&mpd_data.base_url);
+        let target_path = path.join(filename);
 
         if let Some(remote_modified) = mpd_data.last_modified {
             if let Ok(local_modified) = target_path.metadata().and_then(|m| m.modified()) {
@@ -87,7 +92,7 @@ impl Downloader {
         if let Some(state) = &state {
             let mut s = state.lock().unwrap();
             s.active_downloads.insert(media_id, ActiveDownload {
-                filename: mpd_data.base_url.clone(),
+                filename: filename.to_string(),
                 creator,
                 bytes_downloaded: 0,
                 total_bytes: None,
@@ -101,7 +106,11 @@ impl Downloader {
 
             let manifest = &media.manifest.dash;
 
-            let mut command = FfmpegCommand::new();
+            let mut command = if let Some(path) = &self.ffmpeg_path {
+                FfmpegCommand::new_with_path(path)
+            } else {
+                FfmpegCommand::new()
+            };
             command
                 .hide_banner()
                 .args(["-cenc_decryption_key", &base16::encode_lower(&key.key)])
@@ -174,6 +183,15 @@ impl Downloader {
 
         let total_bytes = response.content_length();
 
+        let rate_bps: Option<f64> = {
+            let perf = &crate::config::config().performance;
+            if perf.limit_download_rate && perf.download_limit_mb_per_sec > 0.0 {
+                Some(perf.download_limit_mb_per_sec * 1024.0 * 1024.0)
+            } else {
+                None
+            }
+        };
+
         if let Some(state) = &state {
             let mut s = state.lock().unwrap();
             s.active_downloads.insert(media_id, ActiveDownload {
@@ -196,6 +214,12 @@ impl Downloader {
                 let chunk = chunk_result?;
                 file.write_all(&chunk).await?;
                 downloaded += chunk.len() as u64;
+
+                if let Some(bps) = rate_bps {
+                    // Throttle to `DownloadLimitInMbPerSec` by sleeping for
+                    // the time it should have taken to receive this chunk.
+                    tokio::time::sleep(Duration::from_secs_f64(chunk.len() as f64 / bps)).await;
+                }
 
                 if let Some(state) = &state {
                     if let Some(dl) = state.lock().unwrap().active_downloads.get_mut(&media_id) {

@@ -10,6 +10,7 @@ use dirs;
 
 mod tui;
 mod downloader;
+mod config;
 
 use tui::app::{log_message, ScrapeState, LikeState, log_like_message};
 
@@ -147,7 +148,8 @@ fn init_file_logging() -> anyhow::Result<PathBuf> {
     }
     let file = fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
 
-    simplelog::WriteLogger::init(simplelog::LevelFilter::Debug, simplelog::Config::default(), file)
+    let level = config::config().logging_level;
+    simplelog::WriteLogger::init(level, simplelog::Config::default(), file)
         .map_err(|e| anyhow!("Failed to initialize logger: {e}"))?;
 
     info!("=== of-scraper-rs v{} starting ===", env!("CARGO_PKG_VERSION"));
@@ -290,18 +292,10 @@ fn load_cdm() -> Option<of_client::widevine::Cdm> {
 }
 
 fn get_download_path() -> PathBuf {
-    let mut path = PathBuf::from("data");
-    let config_conf = resolve_config_path("config.conf");
-    if config_conf.exists() {
-        if let Ok(config) = CustomConfig::load(&config_conf) {
-            if let Some(p) = config.get("download", "downloadpath") {
-                if !p.is_empty() {
-                    path = PathBuf::from(p);
-                }
-            }
-        }
+    match &config::config().download.download_path {
+        Some(p) if !p.as_os_str().is_empty() => p.clone(),
+        _ => PathBuf::from("data"),
     }
-    path
 }
 
 async fn queue_downloads<T>(
@@ -315,10 +309,15 @@ async fn queue_downloads<T>(
 ) -> Vec<tokio::task::JoinHandle<()>> where
     T: of_client::content::Content + of_client::content::HasMedia<Media = of_client::media::Feed> + Send + Sync + 'static,
 {
-    use of_client::media::MediaType;
     use of_client::media::Media;
+    use of_client::media::MediaType;
 
     let content_type_str = T::content_type().to_string();
+    let content_id = content.id();
+    let content_is_paid = content.is_paid();
+    let content_text = content.text().to_string();
+    let content_bucket = content.filename_format_bucket();
+
     let mut content_path = download_path.join(username).join(&content_type_str);
     if let Some(sub) = subfolder {
         // Label/highlight titles can contain characters that are awkward
@@ -327,22 +326,32 @@ async fn queue_downloads<T>(
         content_path = content_path.join(sanitized);
     }
 
+    // Folder.FolderPer*Post/Message — one subfolder per content item.
+    if config::folder_per_content(content_bucket, content_is_paid) {
+        let ts = content.timestamp();
+        content_path = content_path.join(format!("{}_{}", ts.format("%Y-%m-%d"), content_id));
+    }
+
     let mut handles = Vec::new();
 
     for media in content.media().iter().cloned() {
         let downloader = downloader.clone();
         let semaphore = semaphore.clone();
         let state_opt = state_opt.clone();
-        let path = content_path.join(match media.media_type() {
-            MediaType::Photo => "Images",
-            MediaType::Audio => "Audios",
-            MediaType::Video | MediaType::Gif => "Videos",
-        });
+        let media_type = *media.media_type();
+
+        if !config::media_type_enabled(media_type) {
+            let msg = format!(
+                "Skipping media {} ({}): disabled by config.conf Download.Media toggles",
+                media.id, config::media_type_name(media_type)
+            );
+            warn!("{}", msg);
+            log_message(&state_opt, &msg);
+            continue;
+        }
 
         let is_drm = media.drm().is_some();
-        let content_id = content.id();
         let media_id = media.id;
-        let drm_type_str = content.drm_type_str();
 
         if !is_drm && media.source().is_none() {
             let msg = format!(
@@ -354,11 +363,87 @@ async fn queue_downloads<T>(
             continue;
         }
 
+        if config::should_skip_duplicates() {
+            let mut seen = config::seen_media().lock().unwrap();
+            if !seen.insert(media_id) {
+                drop(seen);
+                let msg = format!(
+                    "Skipping media {}: already downloaded earlier this run (DownloadDuplicatedMedia = false)",
+                    media_id
+                );
+                debug!("{}", msg);
+                log_message(&state_opt, &msg);
+                continue;
+            }
+        }
+
+        let media_dir = content_path.join(match media_type {
+            MediaType::Photo => "Images",
+            MediaType::Audio => "Audios",
+            MediaType::Video | MediaType::Gif => "Videos",
+        });
+
+        let original_filename = if let Some(url_str) = media.source() {
+            if let Ok(url) = Url::parse(url_str) {
+                url.path_segments()
+                    .and_then(|s| s.last())
+                    .unwrap_or("file")
+                    .to_string()
+            } else {
+                "file".to_string()
+            }
+        } else if is_drm {
+            format!("{}.mp4", media_id)
+        } else {
+            format!("{}", media_id)
+        };
+
+        let final_filename = config::format_download_filename(
+            content_bucket,
+            content_is_paid,
+            content_id,
+            content.timestamp(),
+            &content_text,
+            username,
+            &media,
+            &original_filename,
+        )
+        .unwrap_or_else(|| original_filename.clone());
+
+        // File.RenameExistingFilesWhenCustomFormatIsSelected — if a file
+        // still sits at the default name and hasn't been re-saved under the
+        // custom format yet, move it over. DRM files can't be matched this
+        // way (their old name only shows up in the MPD), so skip those.
+        if !is_drm && config::config().file.rename_existing_files_when_custom_format_is_selected {
+            let old_path = media_dir.join(&original_filename);
+            let new_path = media_dir.join(&final_filename);
+            if old_path != new_path && old_path.exists() && !new_path.exists() {
+                match fs::rename(&old_path, &new_path) {
+                    Ok(_) => log_message(
+                        &state_opt,
+                        &format!(
+                            "Renamed {} → {} (custom filename format)",
+                            old_path.file_name().unwrap_or_default().to_string_lossy(),
+                            new_path.file_name().unwrap_or_default().to_string_lossy()
+                        ),
+                    ),
+                    Err(e) => warn!(
+                        "Could not rename {} to {}: {}",
+                        old_path.display(),
+                        new_path.display(),
+                        e
+                    ),
+                }
+            }
+        }
+
         if let Some(state) = &state_opt {
             state.lock().unwrap().pending_downloads += 1;
         }
 
         let creator_name = username.to_string();
+        let drm_type_str = content.drm_type_str();
+        let path = media_dir.clone();
 
         let handle = tokio::spawn(async move {
             let _permit = match semaphore.acquire().await {
@@ -371,23 +456,7 @@ async fn queue_downloads<T>(
                 }
             };
 
-            let filename = if let Some(url_str) = media.source() {
-                //url_str.split('/').last().unwrap_or("file").to_string()
-                if let Ok(url) = Url::parse(url_str) {
-                    url.path_segments()
-                        .and_then(|s| s.last())
-                        .unwrap_or("file")
-                        .to_string()
-                } else {
-                    "file".to_string()
-                }
-            } else if let Some(_drm) = media.drm() {
-                format!("{}.mp4", media_id)
-            } else {
-                format!("{}", media_id)
-            };
-
-            log_message(&state_opt, &format!("Starting download of {}", filename));
+            log_message(&state_opt, &format!("Starting download of {}", final_filename));
 
             let res = if is_drm {
                 let license_url = format!(
@@ -395,17 +464,17 @@ async fn queue_downloads<T>(
                     media_id, drm_type_str, content_id
                 );
                 if let Some(drm) = media.drm() {
-                    downloader.download_media_drm_tracked(drm, &license_url, &path, media_id, state_opt.clone(), creator_name).await
+                    downloader.download_media_drm_tracked(drm, &license_url, &path, media_id, &final_filename, state_opt.clone(), creator_name).await
                 } else {
                     Err(anyhow!("DRM manifest missing"))
                 }
             } else {
-                downloader.download_media_tracked(&media, &path, state_opt.clone(), creator_name).await
+                downloader.download_media_tracked(&media, &path, &final_filename, state_opt.clone(), creator_name).await
             };
 
             match res {
-                Ok(_) => log_message(&state_opt, &format!("Successfully downloaded {}", filename)),
-                Err(e) => log_message(&state_opt, &format!("Failed to download {}: {}", filename, e)),
+                Ok(_) => log_message(&state_opt, &format!("Successfully downloaded {}", final_filename)),
+                Err(e) => log_message(&state_opt, &format!("Failed to download {}: {}", final_filename, e)),
             }
 
             if let Some(state) = &state_opt {
@@ -450,6 +519,14 @@ pub async fn run_scrape_engine_tui(
     for t in &content_types {
         if state.lock().unwrap().should_quit { break; }
 
+        if !config::content_type_enabled(t) {
+            log_message(&Some(state.clone()), &format!(
+                "Skipping {}: disabled by config.conf Download.Media toggles",
+                t
+            ));
+            continue;
+        }
+
         match t.as_str() {
             "posts" => {
                 let Some(user) = user.as_ref() else {
@@ -473,13 +550,22 @@ pub async fn run_scrape_engine_tui(
                     let mut count = 0;
                     for post in &posts {
                         if state.lock().unwrap().should_quit { break; }
+                        before = Some(post.posted_at);
+                        count += 1;
+
+                        if config::should_skip_post(post) {
+                            log_message(&Some(state.clone()), &format!("Skipping post {} (filtered by config)", post.id));
+                            continue;
+                        }
+                        match config::post_date_filter(post.posted_at) {
+                            config::DateFilter::Keep => {}
+                            config::DateFilter::Skip => continue,
+                            config::DateFilter::Break => break,
+                        }
 
                         state.lock().unwrap().posts_scraped += 1;
 
                         queue_downloads(&downloader, &semaphore, &Some(state.clone()), post, &user.username, &download_path, None).await;
-
-                        before = Some(post.posted_at);
-                        count += 1;
                     }
 
                     if count < 10 { break; }
@@ -507,13 +593,17 @@ pub async fn run_scrape_engine_tui(
                     let mut count = 0;
                     for chat in &chats {
                         if state.lock().unwrap().should_quit { break; }
+                        before_id = Some(chat.id);
+                        count += 1;
+
+                        if config::should_skip_chat(chat) {
+                            log_message(&Some(state.clone()), &format!("Skipping message {} (filtered by config)", chat.id));
+                            continue;
+                        }
 
                         state.lock().unwrap().chats_scraped += 1;
 
                         queue_downloads(&downloader, &semaphore, &Some(state.clone()), chat, &user.username, &download_path, None).await;
-
-                        before_id = Some(chat.id);
-                        count += 1;
                     }
 
                     if count < 10 { break; }
@@ -596,6 +686,13 @@ pub async fn run_scrape_engine_tui(
                     if labels.is_empty() { break; }
 
                     for label in &labels {
+                        if config::is_archive_label(&label.name) && !config::archive_label_enabled() {
+                            log_message(&Some(state.clone()), &format!(
+                                "Skipping label '{}': Archive downloads disabled by config.conf",
+                                label.name
+                            ));
+                            continue;
+                        }
                         let mut before: Option<DateTime<Utc>> = None;
                         loop {
                             if state.lock().unwrap().should_quit { break; }
@@ -613,13 +710,22 @@ pub async fn run_scrape_engine_tui(
                             let mut count = 0;
                             for post in &posts {
                                 if state.lock().unwrap().should_quit { break; }
+                                before = Some(post.posted_at);
+                                count += 1;
+
+                                if config::should_skip_post(post) {
+                                    log_message(&Some(state.clone()), &format!("Skipping post {} (filtered by config)", post.id));
+                                    continue;
+                                }
+                                match config::post_date_filter(post.posted_at) {
+                                    config::DateFilter::Keep => {}
+                                    config::DateFilter::Skip => continue,
+                                    config::DateFilter::Break => break,
+                                }
 
                                 state.lock().unwrap().posts_scraped += 1;
 
                                 queue_downloads(&downloader, &semaphore, &Some(state.clone()), post, &user.username, &download_path, Some(&label.name)).await;
-
-                                before = Some(post.posted_at);
-                                count += 1;
                             }
 
                             if count < 10 { break; }
@@ -1192,6 +1298,10 @@ async fn scrape_user_cli(
     };
 
     for t in types {
+        if !config::content_type_enabled(t) {
+            println!("Skipping {}: disabled by config.conf Download.Media toggles", t);
+            continue;
+        }
         match t {
             "posts" => {
                 let Some(user) = user.as_ref() else { println!("Skipping posts: user could not be resolved"); continue };
@@ -1201,10 +1311,21 @@ async fn scrape_user_cli(
                     if posts.is_empty() { break; }
                     let mut count = 0;
                     for post in &posts {
-                        println!("Queueing post media from post {}", post.id);
-                        tasks.extend(queue_downloads(&downloader, &semaphore, &None, post, &user.username, &download_path, None).await);
                         before = Some(post.posted_at);
                         count += 1;
+
+                        if config::should_skip_post(post) {
+                            println!("Skipping post {} (filtered by config)", post.id);
+                            continue;
+                        }
+                        match config::post_date_filter(post.posted_at) {
+                            config::DateFilter::Keep => {}
+                            config::DateFilter::Skip => continue,
+                            config::DateFilter::Break => break,
+                        }
+
+                        println!("Queueing post media from post {}", post.id);
+                        tasks.extend(queue_downloads(&downloader, &semaphore, &None, post, &user.username, &download_path, None).await);
                     }
                     if count < 10 { break; }
                 }
@@ -1217,10 +1338,16 @@ async fn scrape_user_cli(
                     if chats.is_empty() { break; }
                     let mut count = 0;
                     for chat in &chats {
-                        println!("Queueing chat media from message {}", chat.id);
-                        tasks.extend(queue_downloads(&downloader, &semaphore, &None, chat, &user.username, &download_path, None).await);
                         before_id = Some(chat.id);
                         count += 1;
+
+                        if config::should_skip_chat(chat) {
+                            println!("Skipping message {} (filtered by config)", chat.id);
+                            continue;
+                        }
+
+                        println!("Queueing chat media from message {}", chat.id);
+                        tasks.extend(queue_downloads(&downloader, &semaphore, &None, chat, &user.username, &download_path, None).await);
                     }
                     if count < 10 { break; }
                 }
@@ -1263,16 +1390,31 @@ async fn scrape_user_cli(
                     let (labels, labels_has_more) = client.get_labels(user.id, label_offset).await.map_err(|e| anyhow!("Failed to get labels: {}", e))?;
                     if labels.is_empty() { break; }
                     for label in &labels {
+                        if config::is_archive_label(&label.name) && !config::archive_label_enabled() {
+                            println!("Skipping label '{}': Archive downloads disabled by config.conf", label.name);
+                            continue;
+                        }
                         let mut before: Option<DateTime<Utc>> = None;
                         loop {
                             let posts = client.get_posts_by_label(user.id, &label.id, before).await.map_err(|e| anyhow!("Failed to get posts for label '{}': {}", label.name, e))?;
                             if posts.is_empty() { break; }
                             let mut count = 0;
                             for post in &posts {
-                                println!("Queueing post {} from label '{}'", post.id, label.name);
-                                tasks.extend(queue_downloads(&downloader, &semaphore, &None, post, &user.username, &download_path, Some(&label.name)).await);
                                 before = Some(post.posted_at);
                                 count += 1;
+
+                                if config::should_skip_post(post) {
+                                    println!("Skipping post {} (filtered by config)", post.id);
+                                    continue;
+                                }
+                                match config::post_date_filter(post.posted_at) {
+                                    config::DateFilter::Keep => {}
+                                    config::DateFilter::Skip => continue,
+                                    config::DateFilter::Break => break,
+                                }
+
+                                println!("Queueing post {} from label '{}'", post.id, label.name);
+                                tasks.extend(queue_downloads(&downloader, &semaphore, &None, post, &user.username, &download_path, Some(&label.name)).await);
                             }
                             if count < 10 { break; }
                         }
@@ -1309,6 +1451,10 @@ async fn scrape_user_cli(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load config.conf first so init_file_logging and everything else can
+    // read its settings.
+    let _cfg = config::config();
+
     let log_path = init_file_logging().context("Setting up logging")?;
 
     let cli = Cli::parse();
@@ -1320,16 +1466,36 @@ async fn main() -> anyhow::Result<()> {
             return Err(e);
         }
     };
-    let client = OFClient::new(auth)?;
+    if let Ok(my_id) = auth.user_id.parse::<u64>() {
+        config::set_my_user_id(my_id);
+    }
+
+    let timeout = config::config().performance.timeout;
+    let client = OFClient::new_with_timeout(auth, timeout)?;
+
+    let make_downloader = |client: OFClient| {
+        let cdm = load_cdm();
+        Arc::new(downloader::Downloader::new_with_ffmpeg(
+            client,
+            cdm,
+            config::config().ffmpeg_path.clone(),
+        ))
+    };
 
     match cli.command {
         Some(Commands::Scrape { user, content_type }) => {
-            let cdm = load_cdm();
-            let downloader = Arc::new(downloader::Downloader::new(client.clone(), cdm));
+            let downloader = make_downloader(client.clone());
             scrape_user_cli(&client, downloader, &user, &content_type).await?;
         },
         Some(Commands::List) => {
-            let subs = client.get_subscriptions().await.map_err(|e| anyhow!("Failed to get subscriptions: {}", e))?;
+            let cfg = config::config();
+            let subs = client
+                .get_subscriptions_filtered(
+                    cfg.subscriptions.include_expired_subscriptions,
+                    cfg.subscriptions.include_restricted_subscriptions,
+                )
+                .await
+                .map_err(|e| anyhow!("Failed to get subscriptions: {}", e))?;
             for sub in subs {
                 println!("- {} (@{})", sub.name, sub.username);
             }
@@ -1338,15 +1504,13 @@ async fn main() -> anyhow::Result<()> {
             like_user_cli(&client, &user, &content_type, !unlike).await?;
         },
         Some(Commands::Link { url }) => {
-            let cdm = load_cdm();
-            let downloader = Arc::new(downloader::Downloader::new(client.clone(), cdm));
+            let downloader = make_downloader(client.clone());
             download_link_cli(&client, downloader, &url).await?;
         },
         None => {
             let download_path = get_download_path();
             let config_path = resolve_config_path("config.conf");
-            let cdm = load_cdm();
-            let downloader = Arc::new(downloader::Downloader::new(client.clone(), cdm));
+            let downloader = make_downloader(client.clone());
 
             tui::run_tui(client, downloader, download_path, config_path, log_path)?;
         }

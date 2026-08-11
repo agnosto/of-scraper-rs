@@ -11,7 +11,7 @@ use serde_json;
 use chrono::{DateTime, Utc};
 use log::*;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ContentType {
 	Posts,
 	Chats,
@@ -258,6 +258,16 @@ pub trait Content {
 	fn timestamp(&self) -> DateTime<Utc>; 
 	fn content_type() -> ContentType;
 	fn drm_type_str(&self) -> &'static str { "post" }
+
+	/// Body text of the content item, used for filename formatting and ad
+	/// filtering. Defaults to empty for types that have no text.
+	fn text(&self) -> &str { "" }
+	/// Whether the item was paid (PPV) content. Defaults to false.
+	fn is_paid(&self) -> bool { false }
+	/// Which filename-format bucket this content belongs to (`Posts` vs
+	/// `Chats`). Purchases forward to their inner post/message so that
+	/// `PaidPostFileNameFormat` / `PaidMessageFileNameFormat` apply there too.
+	fn filename_format_bucket(&self) -> ContentType { Self::content_type() }
 }
 
 pub trait CanLike {
@@ -276,6 +286,8 @@ impl Content for Post {
 	fn timestamp(&self) -> DateTime<Utc> { self.posted_at }
 	fn id(&self) -> u64 { self.id }
 	fn content_type() -> ContentType { ContentType::Posts }
+	fn text(&self) -> &str { &self.text }
+	fn is_paid(&self) -> bool { self.price.is_some() }
 }
 
 impl CanLike for Post {
@@ -295,6 +307,8 @@ impl Content for Chat {
 	fn timestamp(&self) -> DateTime<Utc> { self.created_at }
 	fn content_type() -> ContentType { ContentType::Chats }
 	fn drm_type_str(&self) -> &'static str { "message" }
+	fn text(&self) -> &str { &self.text }
+	fn is_paid(&self) -> bool { self.price.is_some() }
 }
 
 impl CanLike for Chat {
@@ -371,6 +385,24 @@ impl Content for Purchase {
 		match self {
 			Purchase::Message(c) => c.drm_type_str(),
 			Purchase::Post(p) => p.drm_type_str(),
+		}
+	}
+	fn text(&self) -> &str {
+		match self {
+			Purchase::Message(c) => c.text(),
+			Purchase::Post(p) => p.text(),
+		}
+	}
+	fn is_paid(&self) -> bool {
+		match self {
+			Purchase::Message(c) => c.is_paid(),
+			Purchase::Post(p) => p.is_paid(),
+		}
+	}
+	fn filename_format_bucket(&self) -> ContentType {
+		match self {
+			Purchase::Message(_) => ContentType::Chats,
+			Purchase::Post(_) => ContentType::Posts,
 		}
 	}
 }
