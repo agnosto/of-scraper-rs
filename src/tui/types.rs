@@ -12,10 +12,6 @@ impl Choice {
         let value = label.clone();
         Self { label, value }
     }
-
-    pub fn with_value(label: impl Into<String>, value: impl Into<String>) -> Self {
-        Self { label: label.into(), value: value.into() }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -30,9 +26,6 @@ pub enum WidgetAction {
     None,
     Submit,
     Cancel,
-    ShowHelp,
-    AltAction,
-    ShowDetails,
     Toggle,
 }
 

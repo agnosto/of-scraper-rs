@@ -844,8 +844,6 @@ pub async fn run_like_engine_tui(
     liking: bool,
     state: Arc<Mutex<LikeState>>,
 ) -> anyhow::Result<()> {
-    use of_client::content::CanLike;
-
     let action = if liking { "Liking" } else { "Unliking" };
     log_like_message(&state, &format!("Fetching user @{}...", username));
     let user = match client.get_user(username.as_str()).await {
@@ -1167,8 +1165,6 @@ async fn like_user_cli(
     content_type: &str,
     liking: bool,
 ) -> anyhow::Result<()> {
-    use of_client::content::CanLike;
-
     let action = if liking { "Liking" } else { "Unliking" };
     println!("{} @{}'s {}...", action, username, content_type);
     let user = client.get_user(username).await.map_err(|e| anyhow!("Failed to get user: {}", e))?;

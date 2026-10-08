@@ -177,8 +177,6 @@ pub struct SharedState {
 
     /// Same idea as `scrape`, but for an in-progress like/unlike run.
     pub like: Mutex<Option<Arc<Mutex<LikeState>>>>,
-
-    pub should_quit: Mutex<bool>,
 }
 
 impl SharedState {
@@ -193,7 +191,6 @@ impl SharedState {
             wizard: Mutex::new(WizardSelections::default()),
             scrape: Mutex::new(None),
             like: Mutex::new(None),
-            should_quit: Mutex::new(false),
         }
     }
 

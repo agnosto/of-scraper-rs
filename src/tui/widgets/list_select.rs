@@ -7,7 +7,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::tui::types::{Choice, ListItem as Item, WidgetAction, WidgetResult};
+use crate::tui::types::{ListItem as Item, WidgetAction, WidgetResult};
 
 /// Single-select list prompt.
 ///
@@ -32,19 +32,6 @@ impl ListSelect {
             .unwrap_or(0);
         state.select(Some(first_selectable));
         Self { message: message.into(), items, state, cursor: first_selectable }
-    }
-
-    pub fn with_default(mut self, value: &str) -> Self {
-        for (i, item) in self.items.iter().enumerate() {
-            if let Item::Choice(Choice { value: v, .. }) = item {
-                if v == value {
-                    self.cursor = i;
-                    self.state.select(Some(i));
-                    break;
-                }
-            }
-        }
-        self
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> WidgetAction {
