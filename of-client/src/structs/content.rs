@@ -45,6 +45,7 @@ pub struct Post {
 	#[serde(default)]
 	pub text: String,
 	pub price: Option<f32>,
+	#[serde(default)]
 	pub author: User,
 	#[serde(default)]
 	can_toggle_favorite: bool,
@@ -448,6 +449,28 @@ fn either_url(u: impl IntoUrl) -> Url {
 	u.into_url().expect("like/unlike urls are always well-formed")
 }
 
+/// Decode a label-posts payload.
+///
+/// Unlike the unlabeled endpoint, the label one is requested with
+/// `format=infinite`, so it answers with the `{list, hasMore}` envelope — but
+/// fall back to the bare array the other endpoint returns.
+///
+/// When both shapes fail, report *both* errors. The bare-array attempt only
+/// ever says "invalid type: map, expected a sequence" once the body is an
+/// object, which hides the envelope error that actually names the offending
+/// field (e.g. "missing field `name`").
+fn parse_label_posts(body: &str) -> anyhow::Result<Vec<Post>> {
+	match serde_json::from_str::<LabelPostsResponse>(body) {
+		Ok(wrapped) => Ok(wrapped.list),
+		Err(envelope_err) => match serde_json::from_str::<Vec<Post>>(body) {
+			Ok(list) => Ok(list),
+			Err(array_err) => Err(anyhow::anyhow!(
+				"envelope decode failed: {envelope_err}; bare array decode failed: {array_err}"
+			)),
+		},
+	}
+}
+
 impl OFClient {
 	pub async fn get_post(&self, post_id: u64) -> reqwest_middleware::Result<Post> {
 		self.get(format!("https://onlyfans.com/api2/v2/posts/{post_id}"))
@@ -621,21 +644,16 @@ impl OFClient {
 		let response = self.get(url).send().await?;
 		let body = response.text().await.map_err(reqwest_middleware::Error::Reqwest)?;
 
-		match serde_json::from_str::<LabelPostsResponse>(&body) {
-			Ok(wrapped) => Ok(wrapped.list),
-			Err(_) => {
-				// Maybe it's actually a bare array like the unlabeled
-				// posts endpoint, not the {list, hasMore} envelope.
-				match serde_json::from_str::<Vec<Post>>(&body) {
-					Ok(list) => Ok(list),
-					Err(e) => {
-						let snippet: String = body.chars().take(2000).collect();
-						error!("Failed to decode label posts response ({}): {}", e, snippet);
-						Err(reqwest_middleware::Error::Middleware(
-							anyhow::anyhow!("Failed to decode label posts response: {e}")
-						))
-					}
-				}
+		match parse_label_posts(&body) {
+			Ok(posts) => Ok(posts),
+			Err(e) => {
+				// Dump enough of the raw body to see what actually broke —
+				// the decode error alone rarely identifies the field.
+				let snippet: String = body.chars().take(2000).collect();
+				error!("Failed to decode label posts response ({}): {}", e, snippet);
+				Err(reqwest_middleware::Error::Middleware(
+					anyhow::anyhow!("Failed to decode label posts response: {e}")
+				))
 			}
 		}
 	}
@@ -655,5 +673,81 @@ impl OFClient {
 		}
 
 		Ok(true)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Shape of a label-posts response: the `{list, hasMore}` envelope, with
+	/// `skip_users=all` reducing every author to `{id, _view}`.
+	const ENVELOPE_WITH_STUB_AUTHOR: &str = r#"{
+		"list": [
+			{
+				"id": 15846235,
+				"postedAt": "2020-03-18T22:22:03+00:00",
+				"text": "Some of you asked for a longer video",
+				"canToggleFavorite": true,
+				"price": 3.3,
+				"isPrivateArchived": true,
+				"mediaCount": 1,
+				"author": { "id": 10600394, "_view": "s" },
+				"media": [
+					{
+						"id": 183936505,
+						"type": "video",
+						"canView": true,
+						"createdAt": null,
+						"files": {
+							"full": { "url": "https://cdn2.onlyfans.com/files/x_source.mp4" },
+							"thumb": { "url": "https://cdn2.onlyfans.com/files/x.jpg" }
+						}
+					}
+				]
+			}
+		],
+		"hasMore": true
+	}"#;
+
+	#[test]
+	fn label_posts_envelope_with_stub_author_decodes() {
+		let posts = parse_label_posts(ENVELOPE_WITH_STUB_AUTHOR).unwrap();
+		assert_eq!(posts.len(), 1);
+		assert_eq!(posts[0].id, 15846235);
+		// The author id is all `skip_users=all` leaves behind, and it is what
+		// `like_url` needs.
+		assert_eq!(posts[0].author.id, 10600394);
+		// Username comes back empty; the scraper supplies the creator's own
+		// username when queueing downloads.
+		assert!(posts[0].author.username.is_empty());
+		assert_eq!(posts[0].media.len(), 1);
+		assert_eq!(posts[0].media[0].id, 183936505);
+	}
+
+	#[test]
+	fn label_posts_bare_array_decodes() {
+		let body = r#"[{"id":15846235,"author":{"id":606456},"media":[]}]"#;
+		let posts = parse_label_posts(body).unwrap();
+		assert_eq!(posts.len(), 1);
+		assert_eq!(posts[0].author.id, 606456);
+	}
+
+	#[test]
+	fn label_posts_post_without_author_decodes() {
+		let body = r#"{"list":[{"id":1}],"hasMore":false}"#;
+		let posts = parse_label_posts(body).unwrap();
+		assert_eq!(posts[0].author.id, 0);
+	}
+
+	/// The regression this whole thing came from: the envelope error used to be
+	/// swallowed, leaving only the bare-array fallback's "invalid type: map,
+	/// expected a sequence", which names no field at all.
+	#[test]
+	fn label_posts_malformed_reports_real_error() {
+		let body = r#"{"list":[{"author":{"id":606456}}],"hasMore":false}"#;
+		let err = parse_label_posts(body).unwrap_err().to_string();
+		assert!(err.contains("missing field `id`"), "unexpected error: {err}");
+		assert!(err.contains("bare array decode failed"), "unexpected error: {err}");
 	}
 }

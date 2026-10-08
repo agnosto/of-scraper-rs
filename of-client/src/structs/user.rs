@@ -15,11 +15,20 @@ pub struct Me {
 	pub ws_url: String
 }
 
-#[derive(Deserialize, Debug)]
+/// A user as returned by the API.
+///
+/// Endpoints called with `skip_users=all` (profile feed, label posts, paid
+/// posts) return a stub instead of a full user — `{"id": 10600394, "_view":
+/// "s"}`. Requiring `name`/`username` there makes every item in the page fail
+/// to decode, so both default to empty; callers that know who they are
+/// scraping pass the real username in themselves.
+#[derive(Deserialize, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct User {
 	pub id: u64,
+	#[serde(default)]
 	pub name: String,
+	#[serde(default)]
 	pub username: String,
 	pub avatar: Option<String>,
 }
