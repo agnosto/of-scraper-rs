@@ -26,7 +26,7 @@ impl Screen for LinkInputScreen {
             WidgetAction::Submit => {
                 if let WidgetResult::Text(value) = self.input.result() {
                     let urls: Vec<String> = value
-                        .split(|c| c == ' ' || c == ',')
+                        .split([' ', ','])
                         .filter(|s| !s.is_empty())
                         .map(|s| s.to_string())
                         .collect();

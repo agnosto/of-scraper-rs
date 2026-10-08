@@ -507,12 +507,11 @@ impl OFClient {
 				use std::collections::HashMap;
 				let user_map: HashMap<u64, String> = wrapped.users.into_iter().map(|u| (u.id, u.username)).collect();
 				for chat in &mut wrapped.list {
-					if let Some(from_user) = &mut chat.from_user {
-						if from_user.username.is_none() || from_user.username.as_ref().map_or(true, |s| s.is_empty()) {
-							if let Some(un) = user_map.get(&from_user.id) {
-								from_user.username = Some(un.clone());
-							}
-						}
+					if let Some(from_user) = &mut chat.from_user
+						&& from_user.username.as_ref().is_none_or(|s| s.is_empty())
+						&& let Some(un) = user_map.get(&from_user.id)
+					{
+						from_user.username = Some(un.clone());
 					}
 				}
 				Ok(wrapped.list)
@@ -554,14 +553,12 @@ impl OFClient {
 				use std::collections::HashMap;
 				let user_map: HashMap<u64, String> = wrapped.users.into_iter().map(|u| (u.id, u.username)).collect();
 				for purchase in &mut wrapped.list {
-					if let Purchase::Message(m) = purchase {
-						if let Some(from_user) = &mut m.from_user {
-							if from_user.username.is_none() || from_user.username.as_ref().map_or(true, |s| s.is_empty()) {
-								if let Some(un) = user_map.get(&from_user.id) {
-									from_user.username = Some(un.clone());
-								}
-							}
-						}
+					if let Purchase::Message(m) = purchase
+						&& let Some(from_user) = &mut m.from_user
+						&& from_user.username.as_ref().is_none_or(|s| s.is_empty())
+						&& let Some(un) = user_map.get(&from_user.id)
+					{
+						from_user.username = Some(un.clone());
 					}
 				}
 				Ok((wrapped.list, wrapped.has_more))
@@ -664,9 +661,9 @@ impl OFClient {
 		}
 
 		let url = content.like_url();
-		if content.uses_toggle_endpoint() {
-			self.post(url).send().await?;
-		} else if like {
+		// The favorites endpoint is a POST in both directions; only the legacy
+		// endpoint needs a DELETE to unlike.
+		if like || content.uses_toggle_endpoint() {
 			self.post(url).send().await?;
 		} else {
 			self.delete(url).send().await?;

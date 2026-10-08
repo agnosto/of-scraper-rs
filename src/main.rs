@@ -6,7 +6,6 @@ use anyhow::{anyhow, Context};
 use log::*;
 use clap::{Parser, Subcommand};
 use chrono::{DateTime, Utc};
-use dirs;
 
 mod tui;
 mod downloader;
@@ -107,9 +106,8 @@ impl CustomConfig {
                 continue;
             }
 
-            if line.ends_with('{') {
-                let block_name = line[..line.len() - 1].trim().to_lowercase();
-                current_block.push(block_name);
+            if let Some(block_name) = line.strip_suffix('{') {
+                current_block.push(block_name.trim().to_lowercase());
                 continue;
             }
 
@@ -157,12 +155,12 @@ fn init_file_logging() -> anyhow::Result<PathBuf> {
 }
 
 fn resolve_config_path(filename: &str) -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join(filename);
-            if candidate.exists() {
-                return candidate;
-            }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join(filename);
+        if candidate.exists() {
+            return candidate;
         }
     }
 
@@ -386,7 +384,7 @@ async fn queue_downloads<T>(
         let original_filename = if let Some(url_str) = media.source() {
             if let Ok(url) = Url::parse(url_str) {
                 url.path_segments()
-                    .and_then(|s| s.last())
+                    .and_then(|mut s| s.next_back())
                     .unwrap_or("file")
                     .to_string()
             } else {
@@ -985,25 +983,24 @@ fn parse_content_link(input: &str) -> anyhow::Result<LinkTarget> {
     let url = Url::parse(input).map_err(|e| anyhow!("Not a valid URL: {e}"))?;
     let segments: Vec<&str> = url.path_segments().map(|s| s.collect()).unwrap_or_default();
 
-    if let Some(pos) = segments.iter().position(|s| *s == "chat") {
-        if let Some(user_id_str) = segments.get(pos + 1) {
-            if let Ok(user_id) = user_id_str.parse::<u64>() {
-                let message_id: u64 = url.query_pairs()
-                    .find(|(k, _)| k == "firstId")
-                    .map(|(_, v)| v.into_owned())
-                    .ok_or_else(|| anyhow!("Chat link is missing '?firstId=' — needed to identify the message"))?
-                    .parse()
-                    .map_err(|_| anyhow!("Couldn't parse the message id out of '?firstId='"))?;
-                return Ok(LinkTarget::Message { user_id, message_id });
-            }
-        }
+    if let Some(pos) = segments.iter().position(|s| *s == "chat")
+        && let Some(user_id_str) = segments.get(pos + 1)
+        && let Ok(user_id) = user_id_str.parse::<u64>()
+    {
+        let message_id: u64 = url.query_pairs()
+            .find(|(k, _)| k == "firstId")
+            .map(|(_, v)| v.into_owned())
+            .ok_or_else(|| anyhow!("Chat link is missing '?firstId=' — needed to identify the message"))?
+            .parse()
+            .map_err(|_| anyhow!("Couldn't parse the message id out of '?firstId='"))?;
+        return Ok(LinkTarget::Message { user_id, message_id });
     }
 
     // Post link: onlyfans.com/{postId}/{username}
-    if let Some(first) = segments.first() {
-        if let Ok(post_id) = first.parse::<u64>() {
-            return Ok(LinkTarget::Post { post_id });
-        }
+    if let Some(first) = segments.first()
+        && let Ok(post_id) = first.parse::<u64>()
+    {
+        return Ok(LinkTarget::Post { post_id });
     }
 
     Err(anyhow!(

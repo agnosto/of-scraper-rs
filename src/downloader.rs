@@ -29,7 +29,7 @@ impl Downloader {
         if let Some(url_str) = media.source() {
             let url = Url::parse(url_str)?;
             let filename = url.path_segments()
-                .and_then(|s| s.last())
+                .and_then(|mut s| s.next_back())
                 .ok_or_else(|| anyhow!("Filename unknown"))?
                 .to_string();
 
@@ -81,12 +81,11 @@ impl Downloader {
         let mpd_data = self.client.get_mpd_data(media).await?;
         let target_path = path.join(filename);
 
-        if let Some(remote_modified) = mpd_data.last_modified {
-            if let Ok(local_modified) = target_path.metadata().and_then(|m| m.modified()) {
-                if local_modified >= remote_modified {
-                    return Ok(());
-                }
-            }
+        if let Some(remote_modified) = mpd_data.last_modified
+            && let Ok(local_modified) = target_path.metadata().and_then(|m| m.modified())
+            && local_modified >= remote_modified
+        {
+            return Ok(());
         }
 
         if let Some(state) = &state {
@@ -221,10 +220,10 @@ impl Downloader {
                     tokio::time::sleep(Duration::from_secs_f64(chunk.len() as f64 / bps)).await;
                 }
 
-                if let Some(state) = &state {
-                    if let Some(dl) = state.lock().unwrap().active_downloads.get_mut(&media_id) {
-                        dl.bytes_downloaded = downloaded;
-                    }
+                if let Some(state) = &state
+                    && let Some(dl) = state.lock().unwrap().active_downloads.get_mut(&media_id)
+                {
+                    dl.bytes_downloaded = downloaded;
                 }
             }
 

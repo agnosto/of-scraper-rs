@@ -60,27 +60,25 @@ pub fn run_tui(
             }
         })?;
 
-        if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
-                if let Some(top) = stack.last_mut() {
-                    match top.handle_key(key, &shared) {
-                        ScreenResult::Push(screen) => stack.push(screen),
-                        ScreenResult::Pop => {
-                            stack.pop();
-                            if stack.is_empty() {
-                                break;
-                            }
-                        }
-                        ScreenResult::Reset(screen) => {
-                            stack.clear();
-                            stack.push(screen);
-                        }
-                        ScreenResult::Quit => break,
-                        ScreenResult::Stay => {}
+        if event::poll(Duration::from_millis(50))?
+            && let Event::Key(key) = event::read()?
+            && (key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat)
+            && let Some(top) = stack.last_mut()
+        {
+            match top.handle_key(key, &shared) {
+                ScreenResult::Push(screen) => stack.push(screen),
+                ScreenResult::Pop => {
+                    stack.pop();
+                    if stack.is_empty() {
+                        break;
                     }
                 }
+                ScreenResult::Reset(screen) => {
+                    stack.clear();
+                    stack.push(screen);
                 }
+                ScreenResult::Quit => break,
+                ScreenResult::Stay => {}
             }
         }
     }
