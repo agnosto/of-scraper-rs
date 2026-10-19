@@ -10,6 +10,8 @@ use chrono::{DateTime, Utc};
 mod tui;
 mod downloader;
 mod config;
+mod db;
+mod backfill;
 
 use tui::app::{log_message, ScrapeState, LikeState, log_like_message};
 
@@ -32,6 +34,10 @@ enum Commands {
         /// Type of content to scrape (posts, chats, stories, highlights, labels, purchases, all)
         #[arg(short, long, default_value = "all")]
         content_type: String,
+        /// Re-download media even if the download database already has it
+        /// (bypasses Download.SkipExistingMedia for this run)
+        #[arg(long)]
+        force: bool,
     },
     /// List subscriptions
     List,
@@ -53,6 +59,62 @@ enum Commands {
     Link {
         /// The post or message link to download
         url: String,
+        /// Re-download even if the download database already has it
+        #[arg(long)]
+        force: bool,
+    },
+    /// Download-database management (no OnlyFans auth needed)
+    Db {
+        #[command(subcommand)]
+        action: DbCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum DbCommand {
+    /// Where the download database lives
+    Path,
+    /// Show download database statistics
+    Stats {
+        /// Restrict to one creator (username as stored in the db)
+        #[arg(short, long)]
+        user: Option<String>,
+    },
+    /// List recorded downloads, newest first
+    List {
+        /// Restrict to one creator
+        #[arg(short, long)]
+        user: Option<String>,
+        /// How many entries to show
+        #[arg(long, default_value_t = 20)]
+        limit: u64,
+        /// Skip the first N entries
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
+    },
+    /// Delete recorded downloads (optionally just one creator's)
+    Clear {
+        /// Restrict to one creator; omit to wipe everything
+        #[arg(short, long)]
+        user: Option<String>,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Import already-downloaded files into the database
+    ///
+    /// Only useful when your filename formats contain {mediaId}: ids are
+    /// extracted by matching the File.*FileNameFormat templates. Files saved
+    /// under the default names can't be matched (ids aren't in their names)
+    /// and are reported as such; they're still covered by the If-Modified-Since
+    /// skip the downloader does regardless.
+    Backfill {
+        /// Restrict to one creator's directory under the download path
+        #[arg(short, long)]
+        user: Option<String>,
+        /// Root of your content tree (default: DownloadPath from config.conf)
+        #[arg(long)]
+        download_path: Option<String>,
     },
 }
 
@@ -154,7 +216,7 @@ fn init_file_logging() -> anyhow::Result<PathBuf> {
     Ok(log_path)
 }
 
-fn resolve_config_path(filename: &str) -> PathBuf {
+pub(crate) fn resolve_config_path(filename: &str) -> PathBuf {
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
@@ -375,6 +437,25 @@ async fn queue_downloads<T>(
             }
         }
 
+        // Cross-run skip: the download database knows this id from a previous
+        // run (or it was backfilled). `--force` bypasses it.
+        if config::skip_existing_media() {
+            match db::has_media(media_id) {
+                Ok(true) => {
+                    let msg = format!(
+                        "Skipping media {}: already recorded in the download database ({})",
+                        media_id,
+                        db::path().display()
+                    );
+                    debug!("{}", msg);
+                    log_message(&state_opt, &msg);
+                    continue;
+                }
+                Ok(false) => {}
+                Err(e) => warn!("Download db unavailable, not skipping media {}: {}", media_id, e),
+            }
+        }
+
         let media_dir = content_path.join(match media_type {
             MediaType::Photo => "Images",
             MediaType::Audio => "Audios",
@@ -440,6 +521,8 @@ async fn queue_downloads<T>(
         }
 
         let creator_name = username.to_string();
+        let creator_for_db = creator_name.clone();
+        let content_type_for_db = content_type_str.clone();
         let drm_type_str = content.drm_type_str();
         let path = media_dir.clone();
 
@@ -471,7 +554,22 @@ async fn queue_downloads<T>(
             };
 
             match res {
-                Ok(_) => log_message(&state_opt, &format!("Successfully downloaded {}", final_filename)),
+                Ok(_) => {
+                    log_message(&state_opt, &format!("Successfully downloaded {}", final_filename));
+                    // The db is the cross-run memory for SkipExistingMedia and
+                    // `db stats`, so record every success regardless of the
+                    // skip setting.
+                    let record = db::MediaRecord {
+                        media_id,
+                        creator: creator_for_db,
+                        media_type: config::media_type_name(media_type).to_string(),
+                        content_type: content_type_for_db,
+                        downloaded_at: chrono::Utc::now(),
+                    };
+                    if let Err(e) = db::record(&record) {
+                        warn!("Could not record media {} in download db: {}", media_id, e);
+                    }
+                }
                 Err(e) => log_message(&state_opt, &format!("Failed to download {}: {}", final_filename, e)),
             }
 
@@ -1452,6 +1550,11 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
+    // db management needs config.conf at most, never OnlyFans auth.
+    if let Some(Commands::Db { action }) = cli.command {
+        return run_db_command(action);
+    }
+
     let auth = match load_auth().context("Loading authentication") {
         Ok(a) => a,
         Err(e) => {
@@ -1476,7 +1579,8 @@ async fn main() -> anyhow::Result<()> {
     };
 
     match cli.command {
-        Some(Commands::Scrape { user, content_type }) => {
+        Some(Commands::Scrape { user, content_type, force }) => {
+            config::set_force_downloads(force);
             let downloader = make_downloader(client.clone());
             scrape_user_cli(&client, downloader, &user, &content_type).await?;
         },
@@ -1496,10 +1600,13 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Like { user, content_type, unlike }) => {
             like_user_cli(&client, &user, &content_type, !unlike).await?;
         },
-        Some(Commands::Link { url }) => {
+        Some(Commands::Link { url, force }) => {
+            config::set_force_downloads(force);
             let downloader = make_downloader(client.clone());
             download_link_cli(&client, downloader, &url).await?;
         },
+        // Db never reaches here — handled before auth setup.
+        Some(Commands::Db { .. }) => unreachable!("db commands are handled before auth setup"),
         None => {
             let download_path = get_download_path();
             let config_path = resolve_config_path("config.conf");
@@ -1509,5 +1616,106 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn run_db_command(action: DbCommand) -> anyhow::Result<()> {
+    match action {
+        DbCommand::Path => {
+            println!("{}", db::path().display());
+        },
+        DbCommand::Stats { user } => {
+            let stats = db::stats(user.as_deref())?;
+            println!("Download database: {}", db::path().display());
+            let scope = user.as_ref().map(|u| format!(" for @{}", u)).unwrap_or_default();
+            if stats.total == 0 {
+                println!("No recorded downloads{scope}.");
+                return Ok(());
+            }
+            println!(
+                "Total{scope}: {} (first: {}, last: {})",
+                stats.total,
+                stats.oldest.as_deref().map(db::fmt_timestamp).unwrap_or_default(),
+                stats.newest.as_deref().map(db::fmt_timestamp).unwrap_or_default(),
+            );
+            for creator in stats.by_creator {
+                println!("\n@{} ({}):", creator.creator, creator.total);
+                println!(
+                    "  Photos {}, Videos {}, Audios {}, Other {}",
+                    creator.photos, creator.videos, creator.audios, creator.other
+                );
+                if let (Some(first), Some(last)) = (&creator.oldest, &creator.newest) {
+                    println!("  first: {}   last: {}", db::fmt_timestamp(first), db::fmt_timestamp(last));
+                }
+            }
+        },
+        DbCommand::List { user, limit, offset } => {
+            if let Some(user) = &user {
+                println!("Recorded downloads for @{} (newest first):", user);
+            } else {
+                println!("Recorded downloads (newest first):");
+            }
+            let records = db::list(user.as_deref(), limit, offset)?;
+            if records.is_empty() {
+                println!("  (nothing in this page)");
+                return Ok(());
+            }
+            for record in records {
+                println!(
+                    "  {:>12}  @{:<20} {:<6} {:<10} {}",
+                    record.media_id,
+                    record.creator,
+                    record.media_type,
+                    record.content_type,
+                    record.downloaded_at.format("%Y-%m-%d %H:%M:%S")
+                );
+            }
+        },
+        DbCommand::Clear { user, yes } => {
+            let count = db::stats(user.as_deref())?.total;
+            let scope = user.as_ref().map(|u| format!(" for @{}", u)).unwrap_or_default();
+            if count == 0 {
+                println!("Download database is already empty{scope}.");
+                return Ok(());
+            }
+            if !yes {
+                let prompt = match &user {
+                    Some(u) => format!("Delete {count} record(s) for @{}?", u),
+                    None => format!("Delete ALL {count} record(s)?"),
+                };
+                println!("{prompt} (y/N)");
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                if !answer.trim().eq_ignore_ascii_case("y") {
+                    println!("Aborted; nothing deleted.");
+                    return Ok(());
+                }
+            }
+            let removed = db::clear(user.as_deref())?;
+            println!("Removed {removed} record(s) from {}.", db::path().display());
+        },
+        DbCommand::Backfill { user, download_path } => {
+            let path = download_path
+                .map(PathBuf::from)
+                .unwrap_or_else(get_download_path);
+            println!("Backfilling from {} into {}...", path.display(), db::path().display());
+
+            let summaries = backfill::run(user.as_deref(), &path)?;
+            let mut total_seen = 0;
+            let mut total_imported = 0;
+            for summary in &summaries {
+                println!(
+                    "  @{}: {} imported, {} not matchable, {} files",
+                    summary.creator, summary.imported, summary.no_match, summary.files_seen
+                );
+                total_seen += summary.files_seen;
+                total_imported += summary.imported;
+            }
+            if summaries.is_empty() {
+                println!("  (no creator directories found under the download path)");
+            }
+            println!("Done: {total_imported} imported out of {total_seen} files. Unmatchable files stay covered by the downloader's If-Modified-Since skips.");
+        },
+    }
     Ok(())
 }

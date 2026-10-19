@@ -37,7 +37,8 @@ Download {
   IgnoreOwnMessages = false         # true = skip messages you sent (by your auth_id)
   DownloadPostsIncrementally = false # no-op: needs a state DB, not implemented
   BypassContentForCreatorsWhoNoLongerExist = false # no-op: purchases already work for deleted accounts
-  DownloadDuplicatedMedia = false   # false = skip media whose id was already downloaded this run
+  DownloadDuplicatedMedia = false   # false = skip media whose id was already downloaded this run (cross-run skipping is SkipExistingMedia)
+  SkipExistingMedia = true          # true = skip media recorded in the download database (state.db, config dir) from an earlier run; scrape --force re-downloads anyway
   SkipAds = false                   # true = skip posts/messages containing #ad or free-trial links
   DownloadPath = ""                 # where content is saved; blank = ./data
   DownloadOnlySpecificDates = false # true = only download posts around CustomDate

@@ -9,7 +9,7 @@
 use std::{
 	collections::{HashMap, HashSet},
 	path::PathBuf,
-	sync::{Mutex, OnceLock},
+	sync::{atomic::{AtomicBool, Ordering}, Mutex, OnceLock},
 };
 
 use chrono::{DateTime, NaiveDate, Utc};
@@ -65,6 +65,10 @@ pub struct DownloadConfig {
 	pub media: MediaConfig,
 	pub ignore_own_messages: bool,
 	pub download_duplicated_media: bool,
+	/// `SkipExistingMedia=true` (default): skip media whose id is already
+	/// recorded in the download database (`state.db`) — it was downloaded on
+	/// some previous run. Overridable per run with `scrape --force`.
+	pub skip_existing_media: bool,
 	pub skip_ads: bool,
 	pub download_path: Option<PathBuf>,
 	pub download_only_specific_dates: bool,
@@ -79,6 +83,7 @@ impl Default for DownloadConfig {
 			media: MediaConfig::default(),
 			ignore_own_messages: false,
 			download_duplicated_media: false,
+			skip_existing_media: true,
 			skip_ads: false,
 			download_path: None,
 			download_only_specific_dates: false,
@@ -171,6 +176,7 @@ impl AppConfig {
 
 		cfg.download.ignore_own_messages = bool_of(&parsed, "download", "ignoreownmessages", false);
 		cfg.download.download_duplicated_media = bool_of(&parsed, "download", "downloadduplicatedmedia", false);
+		cfg.download.skip_existing_media = bool_of(&parsed, "download", "skipexistingmedia", true);
 		cfg.download.skip_ads = bool_of(&parsed, "download", "skipads", false);
 		cfg.download.download_only_specific_dates = bool_of(&parsed, "download", "downloadonlyspecificdates", false);
 		cfg.download.disable_text_sanitization = bool_of(&parsed, "download", "disabletextsanitization", false);
@@ -263,6 +269,7 @@ fn parse_level(s: &str) -> LevelFilter {
 static CONFIG: OnceLock<AppConfig> = OnceLock::new();
 static MY_USER_ID: OnceLock<u64> = OnceLock::new();
 static SEEN_MEDIA: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
+static FORCE_DOWNLOADS: AtomicBool = AtomicBool::new(false);
 
 pub fn config() -> &'static AppConfig {
 	CONFIG.get_or_init(AppConfig::load)
@@ -286,6 +293,21 @@ pub fn seen_media() -> &'static Mutex<HashSet<u64>> {
 /// `DownloadDuplicatedMedia=false` (the default) means skip duplicates.
 pub fn should_skip_duplicates() -> bool {
 	!config().download.download_duplicated_media
+}
+
+/// `scrape --force` / `link --force`: bypass the db skip for this run.
+pub fn set_force_downloads(force: bool) {
+	FORCE_DOWNLOADS.store(force, Ordering::Relaxed);
+}
+
+pub fn force_downloads() -> bool {
+	FORCE_DOWNLOADS.load(Ordering::Relaxed)
+}
+
+/// True when media should be skipped because it is already recorded in the
+/// download database from a previous run.
+pub fn skip_existing_media() -> bool {
+	config().download.skip_existing_media && !force_downloads()
 }
 
 // ---------------------------------------------------------------------------

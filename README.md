@@ -98,6 +98,10 @@ For `auth.json`, `config.conf`, and `device.wvd` alike, in this order:
    `~/.config/of-scraper-rs` (Linux), `~/Library/Application Support/of-scraper-rs`
    (macOS), `%APPDATA%\of-scraper-rs` (Windows).
 
+`state.db` (the download database, used for cross-run dedupe and `db`
+commands) and `of-scraper-rs.log` are also created in all three spots
+above.
+
 ### Setting a download path
 
 In `config.conf`, set `Download.DownloadPath` to wherever you want
@@ -150,6 +154,9 @@ since the scraper shells out to it for any DRM downloads:
     your `auth_id`).
   - `Download.DownloadDuplicatedMedia` — `false` (default) skips media
     whose id was already queued earlier in the run.
+  - `Download.SkipExistingMedia` — `true` (default) skips media recorded
+    in the download database from a previous run (see `db` below);
+    `scrape --force` / `link --force` overrides this for one run.
   - `Download.SkipAds` — skips posts/messages whose text contains `#ad`,
     `free trial`, or an `onlyfans.com/free` link.
   - `Download.DownloadOnlySpecificDates` + `DownloadDateSelection` +
@@ -199,6 +206,21 @@ since the scraper shells out to it for any DRM downloads:
 - **CLI**: `of-scraper-rs scrape <user> --content-type <type>` and
   `of-scraper-rs list` (lists your subscriptions). No subcommand drops
   you into the TUI.
+- **Download dedupe across runs**: every successful download is recorded in
+  `state.db` (a SQLite file next to your config files), and with
+  `Download.SkipExistingMedia` (default `true`) media recorded there is
+  skipped before even being queued. `scrape --force` / `link --force`
+  re-downloads this run's items regardless. Files you already had on disk
+  before this feature are covered by the usual HTTP `If-Modified-Since`
+  skip, and `db backfill` can import their ids when your filename format
+  contains `{mediaId}`:
+  ```text
+  of-scraper-rs db path                          # where state.db lives
+  of-scraper-rs db stats [--user <username>]     # per-creator counts
+  of-scraper-rs db list [--user ...] [--limit N] # newest first
+  of-scraper-rs db clear [--user ...] [--yes]    # forget (creator or all)
+  of-scraper-rs db backfill [--user ...]         # import existing files
+  ```
 - DRM (Widevine) downloads via ffmpeg, with progress tracked accurately
   (no race between a just-spawned download task and the "are we done yet"
   check — that bug existed and is fixed).
@@ -209,8 +231,9 @@ since the scraper shells out to it for any DRM downloads:
   scraping (the underlying API client has the types for these — see
   `ContentType::Streams`/`Notifications` — but nothing in `main.rs`
   scrapes them yet).
-- Date-based/incremental scraping (`DownloadPostsIncrementally`), which
-  needs a persistent "what's already downloaded" store.
+- Date-based/incremental scraping (`DownloadPostsIncrementally`, i.e. only
+  asking the API for pages newer than the last run — the *download* side of
+  "don't repeat" is handled by the state db above).
 - Non-interactive/batch mode (`Interaction{}`), per-creator overrides
   (`CreatorConfigs{}`), and list-based ignoring
   (`Subscriptions.IgnoredUsersListName`).
