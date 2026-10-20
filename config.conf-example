@@ -1,3 +1,5 @@
+# Full per-key reference: docs/config.md (commands & flags: docs/cli.md)
+
 # Auth
 # Only read when auth.json is missing. Fill these in to use config.conf as
 # your auth source (Sess/Auth_Id come out of the "sess=" / "auth_id=" crumbs

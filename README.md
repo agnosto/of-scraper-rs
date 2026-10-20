@@ -6,6 +6,13 @@ with a config/auth file layout modeled loosely after the old (now-defunct)
 OFDL tool. The OFDL-style `config.conf` format is kept for familiarity and
 backward compatibility.
 
+> **Documentation**
+> - `docs/config.md` — full `config.conf` reference: every key, default,
+>   filename-format placeholders, dedupe layers, metadata database.
+> - `docs/cli.md` — every command and flag, plus `state.db` (download
+>   database) management and file locations.
+
+
 ## Setup
 
 ### Getting a binary
@@ -141,56 +148,24 @@ since the scraper shells out to it for any DRM downloads:
     key names matter — the parser lowercases keys but doesn't otherwise
     normalize them (`User_Agent` → `user_agent`, not `UserAgent` →
     `useragent`), so renaming them will silently break the fallback.
-- **`config.conf`** settings that change behavior (see
-  `config.conf-example` for inline docs on each):
+- **`config.conf`** settings — the full per-key reference (defaults,
+  filename-format placeholders, date filters, dedupe layers, metadata
+  database, no-op keys) now lives in **`docs/config.md`**; the quick
+  highlights:
   - `Download.Media.*` — hard filters on top of your TUI/CLI selection.
-    `DownloadStories=false`/`DownloadHighlights=false` disable those
-    content types; `DownloadPosts`/`DownloadPaidPosts` filter free vs PPV
-    posts (and `DownloadMessages`/`DownloadPaidMessages` the same for
-    messages); `DownloadImages`/`DownloadVideos`/`DownloadAudios` filter by
-    media type everywhere (including purchases); `DownloadArchived=false`
-    skips the built-in "Archive" label.
-  - `Download.IgnoreOwnMessages` — skips messages you sent (matched by
-    your `auth_id`).
-  - `Download.DownloadDuplicatedMedia` — `false` (default) skips media
-    whose id was already queued earlier in the run.
-  - `Download.SkipExistingMedia` — `true` (default) skips media recorded
-    in the download database from a previous run (see `db` below);
-    `scrape --force` / `link --force` overrides this for one run.
-  - `Metadata.SaveUserDb` — `false` (default) — when `true`, scraping
-    writes a per-creator `user_data.db` (DIGI-compatible schema) into
-    `<DownloadPath>/<username>/Metadata/`: posts/messages (text, price,
-    date), per-media rows (id, CDN link, local `directory` + `filename`,
-    `downloaded` flag) and a `profiles` row. Also filled by
-    `scrape <user> --metadata-only`, which walks the API and records
-    metadata **without downloading anything** — handy to backfill the
-    metadata db for creators whose files you already have.
-  - `Download.SkipAds` — skips posts/messages whose text contains `#ad`,
-    `free trial`, or an `onlyfans.com/free` link.
-  - `Download.DownloadOnlySpecificDates` + `DownloadDateSelection` +
-    `CustomDate` — date-range filtering for posts (and label posts).
-  - `Download.DownloadPath` — where content is saved (blank = `./data`).
-  - `Download.DisableTextSanitization` — keep raw `{text}` in custom
-    filenames.
-  - `File.*` — custom filename formats for posts/messages (placeholders:
-    `{id}` `{postedAt|createdAt}` `{mediaId}` `{mediaCreatedAt}`
-    `{filename}` `{username}` `{text}` `{rawText}`), plus
-    `RenameExistingFilesWhenCustomFormatIsSelected` to migrate files saved
-    under the default name.
-  - `Folder.*` — per-post/per-message subfolders (`<date>_<id>`).
-  - `Subscriptions.IncludeExpiredSubscriptions` /
-    `IncludeRestrictedSubscriptions` — include those categories in the TUI
-    picker and `list`.
-  - `External.FFmpegPath` — custom ffmpeg binary for DRM downloads.
-  - `Performance.Timeout` — per-request HTTP timeout in seconds.
-  - `Performance.LimitDownloadRate` + `DownloadLimitInMbPerSec` — throttle
-    downloads.
-  - `Logging.LoggingLevel` — level of the `of-scraper-rs.log` file log.
-  - Still parsed-but-ignored (documented in `config.conf-example`):
-    `DisableBrowserAuth`, `DownloadAvatarHeaderPhoto`, `DownloadStreams`,
-    `DownloadPostsIncrementally`, `BypassContentForCreatorsWhoNoLongerExist`,
-    `ShowScrapeSize`, `DownloadVideoResolution`, `CreatorConfigs{}`,
-    `Subscriptions.IgnoredUsersListName`, `Interaction{}`.
+  - `Download.SkipExistingMedia` + `Download.DownloadDuplicatedMedia` —
+    the two dedupe layers (cross-run via the download database, in-run
+    queue dedupe); `scrape --force` / `link --force` bypass the db for
+    one run.
+  - `Metadata.SaveUserDb` — write the DIGI-compatible per-creator
+    `user_data.db`; `scrape <user> --metadata-only` fills it without
+    downloading anything.
+  - `File.*` — custom filename formats for posts/messages, plus
+    `RenameExistingFilesWhenCustomFormatIsSelected` to migrate files
+    saved under the default name.
+  - Everything else (`Folder.*`, `Subscriptions.*`, `External.FFmpegPath`,
+    `Performance.*`, `Logging.*`, date/date-ad filters) is documented
+    in `docs/config.md`.
 - **`device.wvd`**: optional Widevine device file for DRM-protected
   content, resolved the same way as the auth/config files. If absent,
   DRM content is simply skipped.
@@ -213,22 +188,13 @@ since the scraper shells out to it for any DRM downloads:
   on the main menu.
 - **CLI**: `of-scraper-rs scrape <user> --content-type <type>` and
   `of-scraper-rs list` (lists your subscriptions). No subcommand drops
-  you into the TUI.
-- **Download dedupe across runs**: every successful download is recorded in
-  `state.db` (a SQLite file next to your config files), and with
-  `Download.SkipExistingMedia` (default `true`) media recorded there is
-  skipped before even being queued. `scrape --force` / `link --force`
-  re-downloads this run's items regardless. Files you already had on disk
-  before this feature are covered by the usual HTTP `If-Modified-Since`
-  skip, and `db backfill` can import their ids when your filename format
-  contains `{mediaId}`:
-  ```text
-  of-scraper-rs db path                          # where state.db lives
-  of-scraper-rs db stats [--user <username>]     # per-creator counts
-  of-scraper-rs db list [--user ...] [--limit N] # newest first
-  of-scraper-rs db clear [--user ...] [--yes]    # forget (creator or all)
-  of-scraper-rs db backfill [--user ...]         # import existing files
-  ```
+  you into the TUI; `link <url>`, `like/unlike` and the `db` group are
+  all documented in **`docs/cli.md`**.
+- **Download dedupe across runs**: successful downloads are recorded in
+  `state.db` and, with `Download.SkipExistingMedia` (default `true`),
+  skipped on later runs; `db backfill` imports files you already have
+  (needs `{mediaId}` in your filename format). Full details:
+  `docs/config.md` (dedupe layers) and `docs/cli.md` (`db …`).
 - DRM (Widevine) downloads via ffmpeg, with progress tracked accurately
   (no race between a just-spawned download task and the "are we done yet"
   check — that bug existed and is fixed).
