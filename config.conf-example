@@ -48,6 +48,14 @@ Download {
   DisableTextSanitization = false   # true = keep raw {text} in custom filenames
   DownloadVideoResolution = "source" # no-op: only source resolution is available
 }
+# Metadata Settings
+Metadata {
+  # Per-creator metadata database (DIGI-compatible user_data.db) written into
+  # <DownloadPath>/<username>/Metadata/user_data.db while scraping: posts,
+  # messages, media rows (id + local file location) and user profiles. Useful
+  # on its own as a searchable archive, with Stash importers later.
+  SaveUserDb = false                 # true = capture during normal scrapes; `scrape --metadata-only` captures without downloading
+}
 # File Settings
 File {
   # Custom filenames for downloaded media. Placeholders (case-insensitive):

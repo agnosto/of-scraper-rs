@@ -94,6 +94,14 @@ impl Default for DownloadConfig {
 	}
 }
 
+/// `Metadata.SaveUserDb` — per-creator `user_data.db` capture (see
+/// `src/metadata.rs`), DIGI-compatible so external importers (Stash etc.)
+/// can read it.
+#[derive(Debug, Clone, Default)]
+pub struct MetadataConfig {
+	pub save_user_db: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct FileConfig {
 	pub paid_post_file_name_format: Option<String>,
@@ -134,6 +142,7 @@ pub struct AppConfig {
 	pub performance: PerformanceConfig,
 	/// `External.FFmpegPath` — path to a custom ffmpeg binary.
 	pub ffmpeg_path: Option<PathBuf>,
+	pub metadata: MetadataConfig,
 	pub logging_level: LevelFilter,
 }
 
@@ -146,6 +155,7 @@ impl Default for AppConfig {
 			subscriptions: SubscriptionsConfig::default(),
 			performance: PerformanceConfig::default(),
 			ffmpeg_path: None,
+			metadata: MetadataConfig::default(),
 			logging_level: LevelFilter::Debug, // matches the pre-config behavior
 		}
 	}
@@ -178,6 +188,7 @@ impl AppConfig {
 		cfg.download.download_duplicated_media = bool_of(&parsed, "download", "downloadduplicatedmedia", false);
 		cfg.download.skip_existing_media = bool_of(&parsed, "download", "skipexistingmedia", true);
 		cfg.download.skip_ads = bool_of(&parsed, "download", "skipads", false);
+		cfg.metadata.save_user_db = bool_of(&parsed, "metadata", "saveuserdb", false);
 		cfg.download.download_only_specific_dates = bool_of(&parsed, "download", "downloadonlyspecificdates", false);
 		cfg.download.disable_text_sanitization = bool_of(&parsed, "download", "disabletextsanitization", false);
 
@@ -270,6 +281,7 @@ static CONFIG: OnceLock<AppConfig> = OnceLock::new();
 static MY_USER_ID: OnceLock<u64> = OnceLock::new();
 static SEEN_MEDIA: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
 static FORCE_DOWNLOADS: AtomicBool = AtomicBool::new(false);
+static METADATA_ONLY: AtomicBool = AtomicBool::new(false);
 
 pub fn config() -> &'static AppConfig {
 	CONFIG.get_or_init(AppConfig::load)
@@ -308,6 +320,16 @@ pub fn force_downloads() -> bool {
 /// download database from a previous run.
 pub fn skip_existing_media() -> bool {
 	config().download.skip_existing_media && !force_downloads()
+}
+
+/// `scrape --metadata-only` / `link --metadata-only`: walk the API and fill
+/// the metadata database, but never download a byte.
+pub fn set_metadata_only(enabled: bool) {
+	METADATA_ONLY.store(enabled, Ordering::Relaxed);
+}
+
+pub fn metadata_only() -> bool {
+	METADATA_ONLY.load(Ordering::Relaxed)
 }
 
 // ---------------------------------------------------------------------------
@@ -630,5 +652,6 @@ mod tests {
 		assert_eq!(parsed.get("download", "ignoreownmessages").map(|s| s.as_str()), Some("false"));
 		assert_eq!(parsed.get("download", "downloadduplicatedmedia").map(|s| s.as_str()), Some("false"));
 		assert_eq!(parsed.get("download", "skipads").map(|s| s.as_str()), Some("false"));
+		assert_eq!(parsed.get("metadata", "saveuserdb").map(|s| s.as_str()), Some("false"));
 	}
 }

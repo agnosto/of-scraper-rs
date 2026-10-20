@@ -157,6 +157,14 @@ since the scraper shells out to it for any DRM downloads:
   - `Download.SkipExistingMedia` — `true` (default) skips media recorded
     in the download database from a previous run (see `db` below);
     `scrape --force` / `link --force` overrides this for one run.
+  - `Metadata.SaveUserDb` — `false` (default) — when `true`, scraping
+    writes a per-creator `user_data.db` (DIGI-compatible schema) into
+    `<DownloadPath>/<username>/Metadata/`: posts/messages (text, price,
+    date), per-media rows (id, CDN link, local `directory` + `filename`,
+    `downloaded` flag) and a `profiles` row. Also filled by
+    `scrape <user> --metadata-only`, which walks the API and records
+    metadata **without downloading anything** — handy to backfill the
+    metadata db for creators whose files you already have.
   - `Download.SkipAds` — skips posts/messages whose text contains `#ad`,
     `free trial`, or an `onlyfans.com/free` link.
   - `Download.DownloadOnlySpecificDates` + `DownloadDateSelection` +

@@ -69,6 +69,9 @@ pub trait Media {
 	fn thumbnail(&self) -> Option<&str>;
 	fn media_type(&self) -> &MediaType;
 	fn unix_time(&self) -> i64;
+	/// False when this media is still locked and we only see the preview —
+	/// used by the metadata db's `preview` column.
+	fn can_view(&self) -> bool { true }
 
 	#[cfg(feature = "drm")]
 	fn drm(&self) -> Option<&DRM>;
@@ -79,6 +82,7 @@ impl Media for Feed {
 	fn thumbnail(&self) -> Option<&str> { self.files.preview.as_ref().and_then(|preview: &File| preview.url.as_deref()) }
 	fn media_type(&self) -> &MediaType { &self.media_type }
 	fn unix_time(&self) -> i64 { self.created_at.unwrap_or_else(Utc::now).timestamp() }
+	fn can_view(&self) -> bool { self.can_view }
 
 	#[cfg(feature = "drm")]
 	fn drm(&self) -> Option<&DRM> { self.files.drm.as_ref() }

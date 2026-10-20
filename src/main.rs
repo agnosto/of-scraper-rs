@@ -11,6 +11,7 @@ mod tui;
 mod downloader;
 mod config;
 mod db;
+mod metadata;
 mod backfill;
 
 use tui::app::{log_message, ScrapeState, LikeState, log_like_message};
@@ -38,6 +39,10 @@ enum Commands {
         /// (bypasses Download.SkipExistingMedia for this run)
         #[arg(long)]
         force: bool,
+        /// Walk the API and fill the metadata database without downloading
+        /// anything
+        #[arg(long)]
+        metadata_only: bool,
     },
     /// List subscriptions
     List,
@@ -62,6 +67,9 @@ enum Commands {
         /// Re-download even if the download database already has it
         #[arg(long)]
         force: bool,
+        /// Record metadata in the user_data.db without downloading
+        #[arg(long)]
+        metadata_only: bool,
     },
     /// Download-database management (no OnlyFans auth needed)
     Db {
@@ -394,6 +402,31 @@ async fn queue_downloads<T>(
 
     let mut handles = Vec::new();
 
+    // Metadata capture for the content row itself (text/price/date/author)
+    // happens before any media-level filtering, so a metadata-only run
+    // records text-only posts too.
+    if metadata::capture_enabled() {
+        let (capture_user_id, capture_username) = content
+            .metadata_user()
+            .map(|(id, name)| (Some(id), name))
+            .unwrap_or((None, ""));
+        metadata::record_content(
+            download_path,
+            username,
+            metadata::ContentMeta {
+                content_id,
+                text: &content_text,
+                price: content.price(),
+                paid: content_is_paid,
+                archived: false,
+                created_at: content.timestamp(),
+                api_type: &content_type_str,
+                user_id: capture_user_id,
+                username: capture_username,
+            },
+        );
+    }
+
     for media in content.media().iter().cloned() {
         let downloader = downloader.clone();
         let semaphore = semaphore.clone();
@@ -437,25 +470,6 @@ async fn queue_downloads<T>(
             }
         }
 
-        // Cross-run skip: the download database knows this id from a previous
-        // run (or it was backfilled). `--force` bypasses it.
-        if config::skip_existing_media() {
-            match db::has_media(media_id) {
-                Ok(true) => {
-                    let msg = format!(
-                        "Skipping media {}: already recorded in the download database ({})",
-                        media_id,
-                        db::path().display()
-                    );
-                    debug!("{}", msg);
-                    log_message(&state_opt, &msg);
-                    continue;
-                }
-                Ok(false) => {}
-                Err(e) => warn!("Download db unavailable, not skipping media {}: {}", media_id, e),
-            }
-        }
-
         let media_dir = content_path.join(match media_type {
             MediaType::Photo => "Images",
             MediaType::Audio => "Audios",
@@ -489,7 +503,56 @@ async fn queue_downloads<T>(
         )
         .unwrap_or_else(|| original_filename.clone());
 
-        // File.RenameExistingFilesWhenCustomFormatIsSelected — if a file
+        // Metadata row for this media — placed after the filename is known
+        // but before the download skips, so even not-downloaded media is
+        // recorded where the file would live.
+        if metadata::capture_enabled() {
+            let media_record = metadata::MediaMeta {
+                media_id,
+                post_id: content_id,
+                link: media.source(),
+                directory: metadata::relative_download_directory(download_path, &media_dir),
+                filename: final_filename.clone(),
+                size: fs::metadata(media_dir.join(&final_filename)).ok().map(|meta| meta.len() as i64),
+                api_type: &content_type_str,
+                media_type: metadata::media_type_str(media_type),
+                preview: !media.can_view(),
+                downloaded: false,
+                created_at: content.timestamp(),
+            };
+            metadata::record_media(download_path, username, media_record);
+        }
+
+        // --metadata-only: every byte of metadata above is captured, but no
+        // download task is spawned — the API walk stops at the database.
+        if config::metadata_only() {
+            let msg = format!("Captured metadata for media {} (metadata-only, not downloading)", media_id);
+            debug!("{}", msg);
+            log_message(&state_opt, &msg);
+            continue;
+        }
+
+        // Cross-run skip: the download database knows this id from a previous
+        // run (or it was backfilled). `--force` bypasses it. Checked after the
+        // metadata capture so metadata-only runs still see everything.
+        if config::skip_existing_media() {
+            match db::has_media(media_id) {
+                Ok(true) => {
+                    let msg = format!(
+                        "Skipping media {}: already recorded in the download database ({})",
+                        media_id,
+                        db::path().display()
+                    );
+                    debug!("{}", msg);
+                    log_message(&state_opt, &msg);
+                    continue;
+                }
+                Ok(false) => {}
+                Err(e) => warn!("Download db unavailable, not skipping media {}: {}", media_id, e),
+            }
+        }
+
+
         // still sits at the default name and hasn't been re-saved under the
         // custom format yet, move it over. DRM files can't be matched this
         // way (their old name only shows up in the MPD), so skip those.
@@ -523,6 +586,7 @@ async fn queue_downloads<T>(
         let creator_name = username.to_string();
         let creator_for_db = creator_name.clone();
         let content_type_for_db = content_type_str.clone();
+        let download_path_for_db = download_path.to_path_buf();
         let drm_type_str = content.drm_type_str();
         let path = media_dir.clone();
 
@@ -556,6 +620,11 @@ async fn queue_downloads<T>(
             match res {
                 Ok(_) => {
                     log_message(&state_opt, &format!("Successfully downloaded {}", final_filename));
+                    // The metadata db learns the file really exists now
+                    // (size included); it doesn't belong to the download
+                    // task's failure domain, so its error is warning-only.
+                    let downloaded_size = fs::metadata(path.join(&final_filename)).ok().map(|meta| meta.len() as i64);
+                    metadata::mark_downloaded(&download_path_for_db, &creator_for_db, media_id, downloaded_size);
                     // The db is the cross-run memory for SkipExistingMedia and
                     // `db stats`, so record every success regardless of the
                     // skip setting.
@@ -1579,8 +1648,9 @@ async fn main() -> anyhow::Result<()> {
     };
 
     match cli.command {
-        Some(Commands::Scrape { user, content_type, force }) => {
+        Some(Commands::Scrape { user, content_type, force, metadata_only }) => {
             config::set_force_downloads(force);
+            config::set_metadata_only(metadata_only);
             let downloader = make_downloader(client.clone());
             scrape_user_cli(&client, downloader, &user, &content_type).await?;
         },
@@ -1600,8 +1670,9 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Like { user, content_type, unlike }) => {
             like_user_cli(&client, &user, &content_type, !unlike).await?;
         },
-        Some(Commands::Link { url, force }) => {
+        Some(Commands::Link { url, force, metadata_only }) => {
             config::set_force_downloads(force);
+            config::set_metadata_only(metadata_only);
             let downloader = make_downloader(client.clone());
             download_link_cli(&client, downloader, &url).await?;
         },

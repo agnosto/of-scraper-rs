@@ -265,10 +265,17 @@ pub trait Content {
 	fn text(&self) -> &str { "" }
 	/// Whether the item was paid (PPV) content. Defaults to false.
 	fn is_paid(&self) -> bool { false }
+	/// PPV price as the API reports it (e.g. 9.99), when set.
+	fn price(&self) -> Option<f32> { None }
 	/// Which filename-format bucket this content belongs to (`Posts` vs
 	/// `Chats`). Purchases forward to their inner post/message so that
 	/// `PaidPostFileNameFormat` / `PaidMessageFileNameFormat` apply there too.
 	fn filename_format_bucket(&self) -> ContentType { Self::content_type() }
+	/// `(author id, username)` for the metadata database — a post's creator,
+	/// a message's sender (which may be yourself in a chat). `None` for types
+	/// without an obvious author, and the username may be empty (label-post
+	/// author stubs) — callers must treat that as "id only".
+	fn metadata_user(&self) -> Option<(u64, &str)> { None }
 }
 
 pub trait CanLike {
@@ -289,6 +296,8 @@ impl Content for Post {
 	fn content_type() -> ContentType { ContentType::Posts }
 	fn text(&self) -> &str { &self.text }
 	fn is_paid(&self) -> bool { self.price.is_some() }
+	fn price(&self) -> Option<f32> { self.price }
+	fn metadata_user(&self) -> Option<(u64, &str)> { Some((self.author.id, self.author.username.as_str())) }
 }
 
 impl CanLike for Post {
@@ -310,6 +319,12 @@ impl Content for Chat {
 	fn drm_type_str(&self) -> &'static str { "message" }
 	fn text(&self) -> &str { &self.text }
 	fn is_paid(&self) -> bool { self.price.is_some() }
+	fn price(&self) -> Option<f32> { self.price }
+	// A chat message's author is the sender — the creator when they write to
+	// you, `from_user` being yourself when you sent it.
+	fn metadata_user(&self) -> Option<(u64, &str)> {
+		self.from_user.as_ref().map(|user| (user.id, user.username.as_deref().unwrap_or("")))
+	}
 }
 
 impl CanLike for Chat {
@@ -400,10 +415,22 @@ impl Content for Purchase {
 			Purchase::Post(p) => p.is_paid(),
 		}
 	}
+	fn price(&self) -> Option<f32> {
+		match self {
+			Purchase::Message(c) => c.price(),
+			Purchase::Post(p) => p.price(),
+		}
+	}
 	fn filename_format_bucket(&self) -> ContentType {
 		match self {
 			Purchase::Message(_) => ContentType::Chats,
 			Purchase::Post(_) => ContentType::Posts,
+		}
+	}
+	fn metadata_user(&self) -> Option<(u64, &str)> {
+		match self {
+			Purchase::Message(c) => c.metadata_user(),
+			Purchase::Post(p) => p.metadata_user(),
 		}
 	}
 }
