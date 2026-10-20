@@ -7,7 +7,7 @@
 //! without threading a config object through every call site.
 
 use std::{
-	collections::{HashMap, HashSet},
+	collections::{BTreeMap, HashMap, HashSet},
 	path::PathBuf,
 	sync::{atomic::{AtomicBool, Ordering}, Mutex, OnceLock},
 };
@@ -169,6 +169,13 @@ impl AppConfig {
 		if !path.exists() {
 			return cfg;
 		}
+		// Self-update: older config files keep every value the user set, but
+		// gain any recognized keys/sections they don't mention yet (written
+		// back from config.conf-example defaults). A write failure (read-only
+		// dir etc.) is ignored — the in-memory defaults still apply.
+		if let Some(updated) = add_missing_keys_text(&std::fs::read_to_string(&path).unwrap_or_default()) {
+			let _ = std::fs::write(&path, updated);
+		}
 		let Ok(parsed) = CustomConfig::load(&path) else {
 			return cfg;
 		};
@@ -215,7 +222,7 @@ impl AppConfig {
 		cfg.folder.folder_per_paid_post = bool_of(&parsed, "folder", "folderperpaidpost", false);
 		cfg.folder.folder_per_post = bool_of(&parsed, "folder", "folderperpost", false);
 		cfg.folder.folder_per_paid_message = bool_of(&parsed, "folder", "folderperpaidmessage", false);
-		cfg.folder.folder_per_message = bool_of(&parsed, "folder", "foldermessage", false);
+		cfg.folder.folder_per_message = bool_of(&parsed, "folder", "folderpermessage", false);
 
 		cfg.subscriptions.include_expired_subscriptions = bool_of(&parsed, "subscriptions", "includeexpiredsubscriptions", false);
 		cfg.subscriptions.include_restricted_subscriptions = bool_of(&parsed, "subscriptions", "includerestrictedsubscriptions", false);
@@ -271,6 +278,220 @@ fn parse_level(s: &str) -> LevelFilter {
 		"trace" => LevelFilter::Trace,
 		_ => LevelFilter::Error,
 	}
+}
+
+const EXAMPLE_CONF: &str = include_str!("../config.conf-example");
+
+/// The (section path, lowercase key) pairs `AppConfig::load` actually reads
+/// and that the self-update should guarantee in older files. When a new
+/// config key is added to the parser, add it here and to
+/// `config.conf-example` — `example_lines_cover_desired_keys` keeps the two
+/// in step.
+const DESIRED_KEYS: &[(&str, &str)] = &[
+	("download.media", "downloadpaidposts"),
+	("download.media", "downloadposts"),
+	("download.media", "downloadarchived"),
+	("download.media", "downloadstories"),
+	("download.media", "downloadhighlights"),
+	("download.media", "downloadmessages"),
+	("download.media", "downloadpaidmessages"),
+	("download.media", "downloadimages"),
+	("download.media", "downloadvideos"),
+	("download.media", "downloadaudios"),
+	("download", "ignoreownmessages"),
+	("download", "downloadduplicatedmedia"),
+	("download", "skipexistingmedia"),
+	("download", "skipads"),
+	("download", "downloadonlyspecificdates"),
+	("download", "disabletextsanitization"),
+	("download", "downloadpath"),
+	("download", "downloaddateselection"),
+	("download", "customdate"),
+	("metadata", "saveuserdb"),
+	("file", "paidpostfilenameformat"),
+	("file", "postfilenameformat"),
+	("file", "paidmessagefilenameformat"),
+	("file", "messagefilenameformat"),
+	("file", "renameexistingfileswhencustomformatisselected"),
+	("folder", "folderperpaidpost"),
+	("folder", "folderperpost"),
+	("folder", "folderperpaidmessage"),
+	("folder", "folderpermessage"),
+	("subscriptions", "includeexpiredsubscriptions"),
+	("subscriptions", "includerestrictedsubscriptions"),
+	("external", "ffmpegpath"),
+	("performance", "timeout"),
+	("performance", "limitdownloadrate"),
+	("performance", "downloadlimitinmbpersec"),
+	("logging", "logginglevel"),
+];
+
+/// Order in which missing whole sections are written into the user's file.
+const DESIRED_SECTIONS: &[&str] = &[
+	"external",
+	"download",
+	"download.media",
+	"metadata",
+	"file",
+	"folder",
+	"subscriptions",
+	"performance",
+	"logging",
+];
+
+/// A `Section { … }` block found in a config text.
+#[derive(Debug)]
+struct ConfBlock {
+	/// Lowercased, dot-joined path, e.g. `download.media`.
+	path: String,
+	/// Leading spaces of the `Section {` line.
+	indent: usize,
+	/// 0-based line index of the `Section {` line.
+	start: usize,
+	/// 0-based line index of the block's closing `}`.
+	end: usize,
+}
+
+/// Index `Section { … }` blocks and every (section path, lowercase key)
+/// definition line in an OFDL-style config text. Comment/blank lines are
+/// skipped; only `Name {` openers block the stack.
+fn index_conf(text: &str) -> (Vec<ConfBlock>, HashMap<(String, String), usize>) {
+	let mut stack: Vec<(String, usize, usize)> = Vec::new();
+	let mut blocks: Vec<ConfBlock> = Vec::new();
+	let mut keys: HashMap<(String, String), usize> = HashMap::new();
+
+	for (i, raw) in text.lines().enumerate() {
+		let line = raw.trim();
+		if line.is_empty() || line.starts_with('#') {
+			continue;
+		}
+		if line.ends_with('{') && !line.contains('=') {
+			let name = line.trim_end_matches('{').trim().to_lowercase();
+			let indent = raw.len() - raw.trim_start().len();
+			stack.push((name, indent, i));
+			continue;
+		}
+		if line == "}" {
+			if let Some((name, indent, start)) = stack.pop() {
+				let path = if stack.is_empty() {
+					name
+				} else {
+					let mut prefix = stack.iter().map(|(n, _, _)| n.as_str()).collect::<Vec<_>>().join(".");
+					prefix.push('.');
+					prefix.push_str(&name);
+					prefix
+				};
+				blocks.push(ConfBlock {
+					path,
+					indent,
+					start,
+					end: i,
+				});
+			}
+			continue;
+		}
+		if let Some((key, _)) = line.split_once('=') {
+			let path = stack.iter().map(|(n, _, _)| n.as_str()).collect::<Vec<_>>().join(".");
+			keys.insert((path, key.trim().to_lowercase()), i);
+		}
+	}
+
+	(blocks, keys)
+}
+
+/// Adds recognized keys/sections an existing config file is missing,
+/// copying the exact line (value + comment) from `config.conf-example`.
+/// Existing lines are never touched. Returns `None` when nothing is
+/// missing (or nothing can be parsed), so callers can skip the write.
+fn add_missing_keys_text(text: &str) -> Option<String> {
+	if text.trim().is_empty() {
+		return None;
+	}
+
+	let (user_blocks, user_keys) = index_conf(text);
+	let (example_blocks, example_keys) = index_conf(EXAMPLE_CONF);
+	let example_raw: Vec<&str> = EXAMPLE_CONF.lines().collect();
+
+	let user_block_by_path: HashMap<&str, &ConfBlock> =
+		user_blocks.iter().map(|b| (b.path.as_str(), b)).collect();
+	let example_block_by_path: HashMap<&str, &ConfBlock> =
+		example_blocks.iter().map(|b| (b.path.as_str(), b)).collect();
+
+	// line index → lines to insert before that line
+	let mut insertions: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+	// paths that will exist once whole-section inserts are applied
+	let mut covered: HashSet<&str> = HashSet::new();
+
+	// Whole sections the file lacks entirely: copy the example's section
+	// verbatim — into an existing parent block when there is one (e.g.
+	// `Download.Media` into an existing `Download { }`), else at EOF.
+	for path in DESIRED_SECTIONS {
+		if user_block_by_path.contains_key(path) || covered.contains(path) {
+			continue;
+		}
+		let Some(ex_block) = example_block_by_path.get(path) else {
+			continue;
+		};
+		let slice = example_raw[ex_block.start..=ex_block.end]
+			.iter()
+			.map(|l| l.trim_end())
+			.collect::<Vec<_>>();
+		match path.rsplit_once('.') {
+			Some((parent, _)) if user_block_by_path.contains_key(parent) => {
+				let at = user_block_by_path.get(parent).expect("checked").end;
+				insertions.entry(at).or_default().extend(slice.iter().map(|l| l.to_string()));
+			}
+			_ => {
+				let chunk = insertions.entry(text.lines().count()).or_default();
+				chunk.push(String::new());
+				chunk.extend(slice.iter().map(|l| l.to_string()));
+			}
+		}
+		for other in DESIRED_SECTIONS {
+			if other.starts_with(&format!("{path}.")) {
+				covered.insert(other);
+			}
+		}
+	}
+
+	// Individual keys missing from sections the file already has: copy the
+	// example's key line with the section's own value indentation.
+	for (path, key) in DESIRED_KEYS {
+		if user_keys.contains_key(&((*path).to_string(), (*key).to_string())) || covered.contains(path) {
+			continue;
+		}
+		let Some(user_block) = user_block_by_path.get(*path) else {
+			continue;
+		};
+		let Some(&line_idx) = example_keys.get(&((*path).to_string(), (*key).to_string())) else {
+			continue;
+		};
+		let indent = "  ".repeat(user_block.indent / 2 + 1);
+		let content = example_raw[line_idx].trim_end();
+		let line = format!("{}{}", indent, content.trim());
+		insertions.entry(user_block.end).or_default().push(line);
+	}
+
+	if insertions.is_empty() {
+		return None;
+	}
+
+	let total = text.lines().count();
+	let mut out: Vec<String> = Vec::new();
+	for (i, raw) in text.lines().enumerate() {
+		if let Some(chunk) = insertions.get(&i) {
+			out.extend(chunk.iter().cloned());
+		}
+		out.push(raw.to_string());
+	}
+	if let Some(chunk) = insertions.get(&total) {
+		out.extend(chunk.iter().cloned());
+	}
+	let mut updated = out.join("\n");
+	if text.ends_with('\n') {
+		updated.push('\n');
+	}
+	Some(updated)
 }
 
 // ---------------------------------------------------------------------------
@@ -653,5 +874,55 @@ mod tests {
 		assert_eq!(parsed.get("download", "downloadduplicatedmedia").map(|s| s.as_str()), Some("false"));
 		assert_eq!(parsed.get("download", "skipads").map(|s| s.as_str()), Some("false"));
 		assert_eq!(parsed.get("metadata", "saveuserdb").map(|s| s.as_str()), Some("false"));
+	}
+
+	#[test]
+	fn example_lines_cover_desired_keys() {
+		let (_, example_keys) = index_conf(EXAMPLE_CONF);
+		for (path, key) in DESIRED_KEYS {
+			let present = example_keys.contains_key(&((*path).to_string(), (*key).to_string()));
+			assert!(present, "config.conf-example is missing {path}.{key}; the self-update can't add it to older files");
+		}
+	}
+
+	#[test]
+	fn old_config_gains_missing_keys_keeping_values() {
+		// An "old" file: no Metadata section, no SkipExistingMedia, and a
+		// value the updater must not disturb.
+		let old = "External {\n  FFmpegPath = \"\"\n}\nDownload {\n  DownloadPath = \"/mnt/x\"\n}\nFile {\n  PostFileNameFormat = \"{id}\"\n}\n";
+		let updated = add_missing_keys_text(old).expect("update wrote something");
+
+		// new pieces arrive with their example defaults
+		assert!(updated.contains("SkipExistingMedia = true"));
+		assert!(updated.contains("Metadata {"));
+		assert!(updated.contains("SaveUserDb = false"));
+		assert!(updated.contains("Timeout = -1"));
+		// user values survive untouched
+		assert!(updated.contains("DownloadPath = \"/mnt/x\""));
+		assert!(updated.contains("PostFileNameFormat = \"{id}\""));
+		// no whole-section re-add when the section exists
+		let external_count = updated.matches("External {").count();
+		assert_eq!(external_count, 1);
+	}
+
+	#[test]
+	fn self_update_is_idempotent() {
+		let old = "Download {\n  DownloadPath = \"\"\n}\n";
+		let once = add_missing_keys_text(old).expect("update");
+		let twice = add_missing_keys_text(&once);
+		assert!(twice.is_none() || twice.as_deref() == Some(once.as_str()));
+	}
+
+	#[test]
+	fn nested_section_gains_only_missing_keys() {
+		let old = "Download {\n  Media {\n    DownloadImages = false\n  }\n}\n";
+		let updated = add_missing_keys_text(old).expect("update");
+
+		// keeps the override, adds the rest of the Media defaults inside
+		assert!(updated.contains("DownloadImages = false"));
+		assert!(updated.contains("DownloadPosts = true"));
+		assert!(updated.contains("SkipExistingMedia = true"));
+		// Media block added, not duplicated
+		assert_eq!(updated.matches("Media {").count(), 1);
 	}
 }

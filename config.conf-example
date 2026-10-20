@@ -1,4 +1,6 @@
 # Full per-key reference: docs/config.md (commands & flags: docs/cli.md)
+# Note: the scraper adds any keys below that are missing from an existing
+# config.conf on startup (with these defaults); your own values never change.
 
 # Auth
 # Only read when auth.json is missing. Fill these in to use config.conf as

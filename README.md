@@ -166,6 +166,10 @@ since the scraper shells out to it for any DRM downloads:
   - Everything else (`Folder.*`, `Subscriptions.*`, `External.FFmpegPath`,
     `Performance.*`, `Logging.*`, date/date-ad filters) is documented
     in `docs/config.md`.
+  - **Config self-update**: keys/sections your existing `config.conf`
+    doesn't mention are automatically added from `config.conf-example`
+    defaults when the scraper starts — your own values are never
+    modified (written-back details in `docs/config.md`).
 - **`device.wvd`**: optional Widevine device file for DRM-protected
   content, resolved the same way as the auth/config files. If absent,
   DRM content is simply skipped.

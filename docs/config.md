@@ -12,6 +12,15 @@ marks a comment to end-of-line. Keys are case-insensitive; string values
 may be quoted. Any missing key silently keeps its built-in default, so a
 minimal config file works.
 
+**Config self-update**: when the scraper starts, it checks your
+`config.conf` for keys/sections it recognizes but the file doesn't
+mention yet (typically after an upgrade ships new options) and writes
+them in — with their default value plus a short comment — without
+touching any line you already have. New options therefore show up in an
+old file automatically, keeping whatever you had set intact. A file
+that doesn't exist yet is left alone (copy `config.conf-example` to
+start yours).
+
 Table of contents:
 
 - [Download](#download)
