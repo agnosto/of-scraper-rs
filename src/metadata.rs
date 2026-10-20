@@ -99,6 +99,15 @@ impl MediaDigDb {
 		}
 		let conn = Connection::open(path)
 			.with_context(|| format!("Could not open metadata db {}", path.display()))?;
+		// WAL lets DB Browser / Stash importers read the file while a scrape
+		// is actively writing rows, instead of hitting "database is locked"
+		// on every upsert; any SQLite tool auto-checkpoints on open, so the
+		// file stays writeable by DIGI's format afterwards.
+		conn.pragma_update(None, "journal_mode", "WAL")
+			.with_context(|| format!("Could not enable WAL on {}", path.display()))?;
+		// Wait out lock contention from external readers/writers instead of
+		// erroring instantly.
+		conn.busy_timeout(std::time::Duration::from_secs(5))?;
 		conn.execute_batch(
 			"CREATE TABLE IF NOT EXISTS alembic_version (
 				version_num VARCHAR(32) NOT NULL,
