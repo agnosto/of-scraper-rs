@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex}};
+use std::{
+	collections::HashMap,
+	path::PathBuf,
+	sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}},
+};
 
 use log::info;
 use of_client::OFClient;
@@ -168,6 +172,9 @@ pub struct SharedState {
     /// Cached subscriptions list, fetched once and reused by the picker
     /// screen (and any future "pick a creator" screen).
     pub subscriptions: Mutex<LoadState<Vec<CreatorEntry>>>,
+    /// True while a subscriptions fetch is in flight; retry requests during
+    /// one are dropped instead of piling up duplicate requests.
+    subscriptions_fetching: AtomicBool,
 
     pub wizard: Mutex<WizardSelections>,
 
@@ -188,18 +195,23 @@ impl SharedState {
             config_path,
             log_path,
             subscriptions: Mutex::new(LoadState::Loading),
+            subscriptions_fetching: AtomicBool::new(false),
             wizard: Mutex::new(WizardSelections::default()),
             scrape: Mutex::new(None),
             like: Mutex::new(None),
         }
     }
 
-    /// Kick off `client.get_subscriptions()` in the background exactly
-    /// once; safe to call repeatedly (only fires the request if we're
-    /// still in `Loading` and haven't started yet — callers should guard
-    /// with their own "already requested" flag if they call this on every
-    /// frame; here we just overwrite, so call it once on screen entry).
+    /// (Re-)start the subscriptions fetch: flips the shared cache back to
+    /// `Loading` — so a screen that just hit an old error shows a spinner,
+    /// not the stale error — and fires the request in the background. No-op
+    /// while a fetch is already in flight (pressing retry repeatedly can't
+    /// stack up duplicate bursts, which would rate-limit harder).
     pub fn spawn_fetch_subscriptions(self_arc: &Arc<SharedState>) {
+        if self_arc.subscriptions_fetching.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        *self_arc.subscriptions.lock().unwrap() = LoadState::Loading;
         let shared = self_arc.clone();
         tokio::spawn(async move {
             let cfg = crate::config::config();
@@ -210,6 +222,9 @@ impl SharedState {
                     cfg.subscriptions.include_restricted_subscriptions,
                 )
                 .await;
+            // Clear the in-flight guard first so a retry pressed while the
+            // slot is being written isn't lost.
+            shared.subscriptions_fetching.store(false, Ordering::SeqCst);
             let mut slot = shared.subscriptions.lock().unwrap();
             match result {
                 Ok(subs) => {

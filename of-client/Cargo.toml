@@ -15,6 +15,7 @@ deserializers = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 cached = { version = "0.54.0", features = ["async"] }
 reqwest = { workspace = true, features = ["cookies", "gzip", "json", "stream"] }
+tokio = { workspace = true, features = ["time"] }
 reqwest-middleware = { version = "0.4.0", features = ["json"] }
 reqwest_cookie_store = "0.8.0"
 async-trait = "0.1.85"

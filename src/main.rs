@@ -428,6 +428,12 @@ async fn queue_downloads<T>(
     }
 
     for media in content.media().iter().cloned() {
+        // Aborted run: stop before queueing anything new.
+        if let Some(state) = &state_opt
+            && state.lock().unwrap().should_quit
+        {
+            break;
+        }
         let downloader = downloader.clone();
         let semaphore = semaphore.clone();
         let state_opt = state_opt.clone();
@@ -591,6 +597,16 @@ async fn queue_downloads<T>(
         let path = media_dir.clone();
 
         let handle = tokio::spawn(async move {
+            // Aborted before this task even started: drop out without
+            // touching the queue. unstarted waiters drain via this check.
+            if let Some(state) = &state_opt
+                && state.lock().unwrap().should_quit
+            {
+                state.lock().unwrap().pending_downloads -= 1;
+                log_message(&state_opt, &format!("Skipped download of {} (scrape aborted)", final_filename));
+                return;
+            }
+
             let _permit = match semaphore.acquire().await {
                 Ok(p) => p,
                 Err(_) => {
@@ -600,6 +616,16 @@ async fn queue_downloads<T>(
                     return;
                 }
             };
+
+            // It may also have been queued long before the abort and is
+            // only getting its per-slot now: still skip.
+            if let Some(state) = &state_opt
+                && state.lock().unwrap().should_quit
+            {
+                state.lock().unwrap().pending_downloads -= 1;
+                log_message(&state_opt, &format!("Skipped download of {} (scrape aborted)", final_filename));
+                return;
+            }
 
             log_message(&state_opt, &format!("Starting download of {}", final_filename));
 
@@ -935,11 +961,10 @@ pub async fn run_scrape_engine_tui(
     state.lock().unwrap().status = "Finishing downloads...".to_string();
     log_message(&Some(state.clone()), "Scraping loop finished. Waiting for active downloads to complete...");
 
-    loop {
-        let nothing_pending = state.lock().unwrap().pending_downloads == 0;
-        if nothing_pending || state.lock().unwrap().should_quit {
-            break;
-        }
+    // Drain before declaring finished — including after a TUI abort, where
+    // unstarted queued downloads exit via their should_quit checks and the
+    // handful of in-flight ones are allowed to finish.
+    while state.lock().unwrap().pending_downloads != 0 {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
 
@@ -982,9 +1007,8 @@ pub async fn run_scrape_all_purchases_tui(
 
     state.lock().unwrap().status = "Finishing downloads...".to_string();
     log_message(&Some(state.clone()), "Scraping loop finished. Waiting for active downloads to complete...");
-    loop {
-        let nothing_pending = state.lock().unwrap().pending_downloads == 0;
-        if nothing_pending || state.lock().unwrap().should_quit { break; }
+    // Same drain-before-finish as the creator scrape (abort-safe).
+    while state.lock().unwrap().pending_downloads != 0 {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
     state.lock().unwrap().is_finished = true;

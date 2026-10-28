@@ -4,7 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     Frame,
 };
 
@@ -27,11 +27,18 @@ pub struct ScrapingScreen {
     /// runs every loop iteration, so without this it would try to push a
     /// new copy on every single frame after finishing.
     transitioned: bool,
+    /// `Esc`/`Q` during an active run requires a confirmation first; this
+    /// tracks whether the prompt is on screen.
+    confirming_abort: bool,
+    /// Abort confirmed: stay on screen (showing the drain progress) until
+    /// the scrape engine reports everything settled, then go back one
+    /// screen instead of "next action".
+    aborted: bool,
 }
 
 impl ScrapingScreen {
     pub fn new() -> Self {
-        Self { transitioned: false }
+        Self { transitioned: false, confirming_abort: false, aborted: false }
     }
 }
 
@@ -47,12 +54,35 @@ impl Screen for ScrapingScreen {
 
         if is_finished {
             self.transitioned = true;
+            if self.aborted {
+                // Hand the state back — the engine just drained, nothing
+                // behind that flag can restart on its own.
+                *shared.scrape.lock().unwrap() = None;
+                return ScreenResult::Pop;
+            }
             return ScreenResult::Push(Box::new(crate::tui::screens::next_action::NextActionScreen::new()));
         }
         ScreenResult::Stay
     }
 
     fn handle_key(&mut self, key: KeyEvent, shared: &Arc<SharedState>) -> ScreenResult {
+        if self.confirming_abort {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    if let Some(scrape) = shared.scrape.lock().unwrap().as_ref() {
+                        scrape.lock().unwrap().should_quit = true;
+                    }
+                    self.aborted = true;
+                    self.confirming_abort = false;
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.confirming_abort = false;
+                }
+                _ => {}
+            }
+            return ScreenResult::Stay;
+        }
+
         if key.code == KeyCode::Char('q') || key.code == KeyCode::Esc {
             let is_finished = shared.scrape.lock().unwrap()
                 .as_ref()
@@ -63,10 +93,19 @@ impl Screen for ScrapingScreen {
                 return ScreenResult::Push(Box::new(crate::tui::screens::next_action::NextActionScreen::new()));
             }
 
-            if let Some(scrape) = shared.scrape.lock().unwrap().as_ref() {
-                scrape.lock().unwrap().should_quit = true;
+            // Draining after a confirmed abort: a second Esc leaves now
+            // (queued downloads were already dropped; the ≤4 in-flight ones
+            // keep going detached, once, since no task ever starts new
+            // content after the abort).
+            if self.aborted {
+                *shared.scrape.lock().unwrap() = None;
+                return ScreenResult::Pop;
             }
-            return ScreenResult::Pop;
+
+            // Going back during an active scrape pops behind the engine's
+            // back, so ask before stopping it.
+            self.confirming_abort = true;
+            return ScreenResult::Stay;
         }
         ScreenResult::Stay
     }
@@ -127,14 +166,46 @@ impl Screen for ScrapingScreen {
             .block(Block::default().borders(Borders::ALL).title(" Scraper Logs ").border_style(Style::default().fg(Color::Magenta)));
         frame.render_widget(log_list, body_chunks[1]);
 
-        let quit_text = if s.is_finished {
-            "Scrape completed. Press [Q] or [Esc] to go back."
+        let quit_text: String = if s.is_finished {
+            "Scrape completed. Press [Q] or [Esc] to go back.".to_string()
+        } else if self.aborted {
+            format!(
+                "Aborting: {} download(s) still queued/running — unstarted ones are dropped, running ones finish. [Esc] to leave now",
+                s.pending_downloads
+            )
         } else {
-            "Scraping in progress... Press [Q] or [Esc] to abort."
+            "Scraping in progress... Press [Q] or [Esc] to abort.".to_string()
         };
         let footer_text = format!(" {} | Destination: {}", quit_text, s.download_path.to_string_lossy());
         let footer = Paragraph::new(footer_text)
             .block(Block::default().borders(Borders::ALL).title(" Controls ").border_style(Style::default().fg(Color::DarkGray)));
         frame.render_widget(footer, chunks[2]);
+
+        if self.confirming_abort {
+            // Modal: dim everything under a small centered panel.
+            let overlay = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(42),
+                    Constraint::Length(5),
+                    Constraint::Percentage(42),
+                ])
+                .split(area)[1];
+            let overlay = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(15),
+                    Constraint::Percentage(70),
+                    Constraint::Percentage(15),
+                ])
+                .split(overlay)[1];
+            frame.render_widget(Clear, overlay);
+            let confirm = Paragraph::new(
+                "Abort this scrape? Unstarted queued downloads are dropped; the ones\n\
+                 already running finish. [Y] abort   [N] continue",
+            )
+            .block(Block::default().borders(Borders::ALL).title(" Confirm abort ").border_style(Style::default().fg(Color::Red)));
+            frame.render_widget(confirm, overlay);
+        }
     }
 }

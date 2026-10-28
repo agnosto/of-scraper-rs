@@ -160,6 +160,25 @@ DRM-protected videos decrypt with `ffmpeg` plus a Widevine device file:
 2. A `device.wvd` Widevine device file in your config directory. If
    missing, DRM media are logged as skipped (`no DRM device`).
 
+## TUI keys and flows
+
+Interactive behavior worth knowing:
+
+- **Creator picker**: if loading subscriptions fails, the picker shows the
+  error with `[R] retry` (the retry itself already waits out 429 rate
+  limits and paces the listing pages) and `[Esc] back`. Entering the
+  screen again also starts a fresh load — stale errors never stick, and a
+  late success flips the error screen straight into the picker.
+- **Scraping screen**: while a scrape runs, `[Q]`/`[Esc]` asks first
+  (`[Y] abort / [N] continue`). Confirmed abort: any queued-but-unstarted
+  downloads are dropped, the ≤4 already-running ones are allowed to
+  finish (the footer shows how many are draining), and once drained you
+  land back on the content-type checklist. Nothing keeps running invisibly.
+- **Like/unlike screen**: `[Q]`/`[Esc]` asks first (`[Y] stop / [N]
+  continue`); the run stops between items and returns one screen back.
+- **After a completed run**: the "what next" screen offers scraping
+  another creator, liking another, the main menu, or quitting.
+
 ## Errors and logging
 
 Failures print to the terminal and, per `LoggingLevel`, to

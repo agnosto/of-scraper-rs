@@ -56,6 +56,14 @@ pub trait IDType : fmt::Display {}
 impl IDType for &str {}
 impl IDType for u64 {}
 
+/// Following a full page, wait this long before asking for the next one —
+/// the `subscribes` endpoint rate-limits back-to-back listing requests.
+const SUBSCRIPTION_PAGE_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Seconds to wait before re-trying a 429-rate-limited page — one wait per
+/// attempt, and `None` when the attempts are exhausted.
+const SUBSCRIPTION_RATE_LIMIT_BACKOFF: [u64; 3] = [2, 5, 10];
+
 impl OFClient {
 	pub async fn get_user<I: IDType>(&self, user_id: I) -> reqwest_middleware::Result<User> {
 		self.get(format!("https://onlyfans.com/api2/v2/users/{user_id}"))
@@ -99,10 +107,8 @@ impl OFClient {
 				let url = format!(
 					"https://onlyfans.com/api2/v2/subscriptions/subscribes?limit={limit}&offset={offset}&type={category}"
 				);
-				let users: Vec<User> = self.get(&url)
-					.send()
-					.and_then(|response| response.json::<Vec<User>>().map_err(Into::into))
-					.await?;
+				let users: Vec<User> = fetch_subscriptions_page(self, &url).await?;
+				let full_page = users.len() as u64 == limit;
 
 				if users.is_empty() { break; }
 				for user in users {
@@ -112,8 +118,65 @@ impl OFClient {
 				}
 
 				offset += limit;
+				// A full page usually means another page is coming; pace the
+				// listing so it doesn't trip the rate limiter.
+				if full_page {
+					tokio::time::sleep(SUBSCRIPTION_PAGE_DELAY).await;
+				}
 			}
 		}
 		Ok(all_users)
+	}
+}
+
+/// True when the middleware error the status-log middleware produced came
+/// from a 429 Too Many Requests response.
+fn is_rate_limited(err: &reqwest_middleware::Error) -> bool {
+	match err {
+		reqwest_middleware::Error::Reqwest(reqwest_err) => {
+			reqwest_err.status() == Some(reqwest::StatusCode::TOO_MANY_REQUESTS)
+		}
+		_ => false,
+	}
+}
+
+fn rate_limit_wait(attempt: usize) -> Option<std::time::Duration> {
+	SUBSCRIPTION_RATE_LIMIT_BACKOFF
+		.get(attempt)
+		.map(|&secs| std::time::Duration::from_secs(secs))
+}
+
+/// One `GET` against the `subscribes` endpoint, transparently waiting out
+/// rate-limited responses (the status-log middleware returns them as
+/// request errors) instead of failing the whole subscriptions fetch.
+async fn fetch_subscriptions_page(client: &OFClient, url: &str) -> reqwest_middleware::Result<Vec<User>> {
+	let mut attempt: usize = 0;
+	loop {
+		match client.get(url).send().await {
+			Ok(response) => return response.json::<Vec<User>>().await.map_err(Into::into),
+			Err(err) => {
+			if is_rate_limited(&err) && let Some(wait) = rate_limit_wait(attempt) {
+				warn!("Rate limited fetching subscriptions page, waiting {}s (attempt {}/3)", wait.as_secs(), attempt + 1);
+				tokio::time::sleep(wait).await;
+				attempt += 1;
+				continue;
+			}
+			return Err(err);
+			}
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn rate_limit_backoff_is_bounded() {
+		assert_eq!(rate_limit_wait(0), Some(std::time::Duration::from_secs(2)));
+		assert_eq!(rate_limit_wait(1), Some(std::time::Duration::from_secs(5)));
+		assert_eq!(rate_limit_wait(2), Some(std::time::Duration::from_secs(10)));
+		assert_eq!(rate_limit_wait(3), None, "give up after the last attempt");
+		assert_eq!(rate_limit_wait(99), None);
 	}
 }

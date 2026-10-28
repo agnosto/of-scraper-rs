@@ -188,6 +188,9 @@ since the scraper shells out to it for any DRM downloads:
 - **TUI flow**: Main Menu → creator picker (type-to-filter against your
   subscriptions) → content-type checklist → live scrape progress screen
   → "what next" screen (scrape another creator / back to menu / quit).
+  A failed subscriptions load can be retried in place (`[R]`); aborting a
+  running scrape asks for confirmation, drops unstarted queued downloads,
+  and waits for the in-flight ones before returning.
   Also has a Donate screen and shows the repo link + resolved config path
   on the main menu.
 - **CLI**: `of-scraper-rs scrape <user> --content-type <type>` and
