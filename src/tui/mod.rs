@@ -30,6 +30,17 @@ pub fn run_tui(
     terminal.clear()?;
 
     let shared = Arc::new(SharedState::new(client, downloader, download_path, config_path, log_path));
+
+    // Opt-in background update check; the notice shows up on the main
+    // menu once it resolves (spawns before the screen loop starts —
+    // no startup delay, failures are silent).
+    let update_slot = Arc::clone(&shared);
+    tokio::spawn(async move {
+        if let Some(info) = crate::updater::auto_check().await {
+            *update_slot.update.lock().unwrap() = Some(info);
+        }
+    });
+
     let mut stack: Vec<Box<dyn Screen>> = vec![Box::new(MainMenuScreen::new())];
 
     loop {

@@ -184,6 +184,9 @@ pub struct SharedState {
 
     /// Same idea as `scrape`, but for an in-progress like/unlike run.
     pub like: Mutex<Option<Arc<Mutex<LikeState>>>>,
+
+    /// Update notice once the (optional, background) check resolves.
+    pub update: Mutex<Option<crate::updater::UpdateInfo>>,
 }
 
 impl SharedState {
@@ -199,6 +202,7 @@ impl SharedState {
             wizard: Mutex::new(WizardSelections::default()),
             scrape: Mutex::new(None),
             like: Mutex::new(None),
+            update: Mutex::new(None),
         }
     }
 

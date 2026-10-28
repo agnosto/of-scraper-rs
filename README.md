@@ -166,6 +166,10 @@ since the scraper shells out to it for any DRM downloads:
   - Everything else (`Folder.*`, `Subscriptions.*`, `External.FFmpegPath`,
     `Performance.*`, `Logging.*`, date/date-ad filters) is documented
     in `docs/config.md`.
+  - `Updates.CheckForUpdates` (opt-in) — daily check of GitHub Releases
+    with a notice on the TUI main menu; check-only, nothing is ever
+    downloaded or replaced, and `of-scraper-rs check-update` works
+    on demand regardless of the setting.
   - **Config self-update**: keys/sections your existing `config.conf`
     doesn't mention are automatically added from `config.conf-example`
     defaults when the scraper starts — your own values are never

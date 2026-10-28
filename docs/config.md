@@ -33,6 +33,7 @@ Table of contents:
 - [Performance](#performance)
 - [External](#external) (ffmpeg / DRM)
 - [Logging](#logging)
+- [Updates](#updates) (check-only release notices)
 - [Auth](#auth)
 - [Recognized but unimplemented keys](#no-ops)
 
@@ -209,6 +210,19 @@ extra level):
 |---|---|---|
 | `LoggingLevel` | `"error"` | File-log verbosity: `off|error|warn|info|debug|trace`. The log lives next to `config.conf` (`of-scraper-rs.log`). |
 
+## Updates
+
+Check-only release notices — one HTTPS request to GitHub Releases plus a
+small cache file; **nothing is ever downloaded, extracted, or replaced**
+by the scraper itself.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `CheckForUpdates` | `false` (opt-in) | `true` = on TUI startup, ask GitHub Releases once a day whether a newer version exists and show a notice on the main menu (`[U]` opens the release page in your browser). Result is cached in `update-check.json` (next to the config files) for 24h, so repeated starts don't hammer the API. |
+
+The on-demand `of-scraper-rs check-update` command works regardless of
+this setting — see `docs/cli.md`.
+
 ## Auth
 
 Only consulted when `auth.json` is missing. Fill `Sess`, `Auth_Id`,
@@ -238,5 +252,6 @@ deleted accounts via the `?author=` lookup), `ShowScrapeSize`,
 | `auth.json` | same | session authentication; auto-created after login in the TUI |
 | `device.wvd` | same | Widevine device for DRM decryption (optional) |
 | `state.db` | same (SQLite) | cross-run download memory behind `SkipExistingMedia` + `db` commands |
+| `update-check.json` | same | cached result of the last update check (24h TTL, optional) |
 | `of-scraper-rs.log` | same | file log |
 | `<DownloadPath>/<user>/Metadata/user_data.db` | per creator | optional per-creator archive db (see [Metadata](#metadata)) |

@@ -13,6 +13,7 @@ mod config;
 mod db;
 mod metadata;
 mod backfill;
+mod updater;
 
 use tui::app::{log_message, ScrapeState, LikeState, log_like_message};
 
@@ -76,6 +77,9 @@ enum Commands {
         #[command(subcommand)]
         action: DbCommand,
     },
+    /// Check GitHub Releases for a newer version (prints a link; never
+    /// downloads or replaces anything)
+    CheckUpdate,
 }
 
 #[derive(Subcommand)]
@@ -1643,6 +1647,21 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
+	// Update notice for one-shot commands (stderr, so stdout stays clean).
+	// The TUI checks in the background and has its own notice; the explicit
+	// check-update command doesn't need nudging.
+	match &cli.command {
+		Some(Commands::CheckUpdate) => {
+			return run_check_update().await;
+		}
+		Some(_) => {
+			if let Some(info) = updater::cached_notice() {
+				eprintln!("{} — see {}", info.summary(), info.url);
+			}
+		}
+		None => {}
+	}
+
     // db management needs config.conf at most, never OnlyFans auth.
     if let Some(Commands::Db { action }) = cli.command {
         return run_db_command(action);
@@ -1702,6 +1721,8 @@ async fn main() -> anyhow::Result<()> {
         },
         // Db never reaches here — handled before auth setup.
         Some(Commands::Db { .. }) => unreachable!("db commands are handled before auth setup"),
+        // CheckUpdate never reaches here — handled before auth setup.
+		Some(Commands::CheckUpdate) => unreachable!("check-update is handled before auth setup"),
         None => {
             let download_path = get_download_path();
             let config_path = resolve_config_path("config.conf");
@@ -1712,6 +1733,24 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+async fn run_check_update() -> anyhow::Result<()> {
+	match updater::check_now().await {
+		Ok(updater::CheckOutcome::Update(info)) => {
+			println!("{}", info.summary());
+			println!("  {}", info.url);
+			println!("  Download the zip for your platform, or `git pull && cargo build --release`.");
+		}
+		Ok(updater::CheckOutcome::UpToDate) => {
+			println!("of-scraper-rs v{} is up to date (latest release on GitHub).", updater::CURRENT_VERSION);
+		}
+		Err(e) => {
+			error!("Update check failed: {:#}", e);
+			return Err(anyhow!("Update check failed: {:#}", e));
+		}
+	}
+	Ok(())
 }
 
 fn run_db_command(action: DbCommand) -> anyhow::Result<()> {

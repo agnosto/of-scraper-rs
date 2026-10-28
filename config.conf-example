@@ -108,3 +108,9 @@ Performance {
 Logging {
   LoggingLevel = "error"          # off|error|warn|info|debug|trace (file log)
 }
+# Update Notices (opt-in, check-only)
+Updates {
+  # Once a day, ask GitHub Releases if a newer version exists and show a
+  # notice. Never downloads or replaces anything.
+  CheckForUpdates = false         # true = enable the automatic check
+}

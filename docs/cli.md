@@ -22,6 +22,7 @@ directory".
 | [`like`, `--unlike`](#like--unlike) | Like or unlike all of a creator's content |
 | [`link <url>`](#link-url) | Download one post or message by link |
 | [`db …`](#db--download-database) | Manage the cross-run download database (no auth needed) |
+| [`check-update`](#check-update) | Check GitHub for a newer release (no auth needed) |
 
 ## scrape
 
@@ -150,6 +151,30 @@ of-scraper-rs db backfill                 # import what's on disk
 of-scraper-rs db stats                    # sanity check totals
 of-scraper-rs scrape --metadata-only ...  # restore per-creator metadata dbs
 ```
+
+## check-update
+
+```
+of-scraper-rs check-update
+```
+
+Asks GitHub Releases for the latest version and prints it next to the
+running version, plus the release page link. Needs no OnlyFans auth.
+It only *checks* — it never downloads or replaces anything; you update
+by grabbing the platform zip from the releases page or rebuilding.
+
+Behavior notes:
+
+- Works even when `Updates.CheckForUpdates` is off in `config.conf`
+  (that setting only controls the automatic TUI check).
+- Always bypasses the 24h cache and refreshes it.
+- Other commands print a one-line update notice to **stderr** if a fresh
+  cached result says a newer release exists (stdout stays clean for
+  scripts).
+
+In the TUI (when the automatic check is enabled in `config.conf`), the
+main menu shows an update line once a newer release is known; press
+`[U]` to open the release page in your browser.
 
 ## DRM (Widevine) downloads
 

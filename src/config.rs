@@ -102,6 +102,13 @@ pub struct MetadataConfig {
 	pub save_user_db: bool,
 }
 
+/// `Updates { ... }` — check-only release notifications (never downloads).
+#[derive(Debug, Clone, Default)]
+pub struct UpdatesConfig {
+	/// Off by default: checking is an outbound HTTP request, so it's opt-in.
+	pub check_for_updates: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct FileConfig {
 	pub paid_post_file_name_format: Option<String>,
@@ -143,6 +150,7 @@ pub struct AppConfig {
 	/// `External.FFmpegPath` — path to a custom ffmpeg binary.
 	pub ffmpeg_path: Option<PathBuf>,
 	pub metadata: MetadataConfig,
+	pub updates: UpdatesConfig,
 	pub logging_level: LevelFilter,
 }
 
@@ -156,6 +164,7 @@ impl Default for AppConfig {
 			performance: PerformanceConfig::default(),
 			ffmpeg_path: None,
 			metadata: MetadataConfig::default(),
+			updates: UpdatesConfig::default(),
 			logging_level: LevelFilter::Debug, // matches the pre-config behavior
 		}
 	}
@@ -196,6 +205,7 @@ impl AppConfig {
 		cfg.download.skip_existing_media = bool_of(&parsed, "download", "skipexistingmedia", true);
 		cfg.download.skip_ads = bool_of(&parsed, "download", "skipads", false);
 		cfg.metadata.save_user_db = bool_of(&parsed, "metadata", "saveuserdb", false);
+		cfg.updates.check_for_updates = bool_of(&parsed, "updates", "checkforupdates", false);
 		cfg.download.download_only_specific_dates = bool_of(&parsed, "download", "downloadonlyspecificdates", false);
 		cfg.download.disable_text_sanitization = bool_of(&parsed, "download", "disabletextsanitization", false);
 
@@ -308,6 +318,7 @@ const DESIRED_KEYS: &[(&str, &str)] = &[
 	("download", "downloaddateselection"),
 	("download", "customdate"),
 	("metadata", "saveuserdb"),
+	("updates", "checkforupdates"),
 	("file", "paidpostfilenameformat"),
 	("file", "postfilenameformat"),
 	("file", "paidmessagefilenameformat"),
@@ -337,6 +348,7 @@ const DESIRED_SECTIONS: &[&str] = &[
 	"subscriptions",
 	"performance",
 	"logging",
+	"updates",
 ];
 
 /// A `Section { … }` block found in a config text.
@@ -874,6 +886,7 @@ mod tests {
 		assert_eq!(parsed.get("download", "downloadduplicatedmedia").map(|s| s.as_str()), Some("false"));
 		assert_eq!(parsed.get("download", "skipads").map(|s| s.as_str()), Some("false"));
 		assert_eq!(parsed.get("metadata", "saveuserdb").map(|s| s.as_str()), Some("false"));
+		assert_eq!(parsed.get("updates", "checkforupdates").map(|s| s.as_str()), Some("false"));
 	}
 
 	#[test]

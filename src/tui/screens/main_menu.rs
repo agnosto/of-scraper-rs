@@ -16,8 +16,6 @@ use crate::tui::{
     widgets::list_select::ListSelect,
 };
 
-const GITHUB_REPO: &str = "https://github.com/agnosto/of-scraper-rs";
-
 pub struct MainMenuScreen {
     list: ListSelect,
 }
@@ -39,6 +37,14 @@ impl MainMenuScreen {
 
 impl Screen for MainMenuScreen {
     fn handle_key(&mut self, key: KeyEvent, shared: &Arc<SharedState>) -> ScreenResult {
+        // [U] opens the release page for a known update notice (pre-check
+        // so an unknown key still falls through to the menu list).
+        if matches!(key.code, crossterm::event::KeyCode::Char('u') | crossterm::event::KeyCode::Char('U'))
+            && let Some(info) = shared.update.lock().unwrap().clone()
+        {
+            crate::updater::open_url(&info.url);
+            return ScreenResult::Stay;
+        }
         match self.list.handle_key(key) {
             WidgetAction::Submit => {
                 if let WidgetResult::SingleSelect(value) = self.list.result() {
@@ -98,9 +104,31 @@ impl Screen for MainMenuScreen {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, shared: &Arc<SharedState>) {
+        let update = shared.update.lock().unwrap().clone();
+        let mut footer_lines: Vec<Line> = Vec::new();
+        let footer_height = if update.is_some() { 4 } else { 3 };
+        if let Some(info) = update {
+            footer_lines.push(Line::from(Span::styled(
+                format!(
+                    "Update available: {} (installed: v{}) — press [U] to open the release page",
+                    info.latest,
+                    crate::updater::CURRENT_VERSION
+                ),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            )));
+        }
+        footer_lines.push(Line::from(Span::styled(
+            format!("Repo: https://github.com/agnosto/of-scraper-rs   |   Config: {}", shared.config_path.display()),
+            Style::default().fg(Color::DarkGray),
+        )));
+        footer_lines.push(Line::from(Span::styled(
+            format!("Log: {}", shared.log_path.display()),
+            Style::default().fg(Color::DarkGray),
+        )));
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(7), Constraint::Min(7), Constraint::Length(3)])
+            .constraints([Constraint::Length(7), Constraint::Min(7), Constraint::Length(footer_height)])
             .split(area);
 
         let banner = Paragraph::new(vec![
@@ -158,13 +186,7 @@ impl Screen for MainMenuScreen {
 
         self.list.render(frame, chunks[1]);
 
-        let footer_text = format!(
-            "Repo: {}   |   Config: {}\nLog: {}",
-            GITHUB_REPO,
-            shared.config_path.display(),
-            shared.log_path.display()
-        );
-        let footer = Paragraph::new(footer_text).style(Style::default().fg(Color::DarkGray));
+        let footer = Paragraph::new(footer_lines).style(Style::default().fg(Color::DarkGray));
         frame.render_widget(footer, chunks[2]);
     }
 }
