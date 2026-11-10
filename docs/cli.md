@@ -244,7 +244,8 @@ Interactive behavior worth knowing:
   confirmed stop finalizes the current file (and converts it if
   `Livestream.OutputFormat` is set) before returning to the picker.
 - **After a completed run**: the "what next" screen offers scraping
-  another creator, liking another, the main menu, or quitting.
+  another creator, liking another, downloading from link(s), the main
+  menu, or quitting.
 
 ## Errors and logging
 

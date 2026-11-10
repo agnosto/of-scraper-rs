@@ -191,7 +191,8 @@ since the scraper shells out to it for any DRM downloads:
     downloaded into per-label subfolders
 - **TUI flow**: Main Menu → creator picker (type-to-filter against your
   subscriptions) → content-type checklist → live scrape progress screen
-  → "what next" screen (scrape another creator / back to menu / quit).
+  → "what next" screen (scrape another creator / like another / download
+  from link(s) / back to menu / quit).
   Main Menu → "Record a livestream" → creator picker with `● LIVE` badges
   (`[R]` refreshes) → recording progress screen (`[S]`/`[Q]` stops after
   confirmation).

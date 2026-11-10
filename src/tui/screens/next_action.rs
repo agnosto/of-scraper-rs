@@ -19,6 +19,7 @@ impl NextActionScreen {
         let items = vec![
             ListItem::Choice(Choice::new("Scrape another creator")),
             ListItem::Choice(Choice::new("Like/unlike another creator")),
+            ListItem::Choice(Choice::new("Download from link(s)")),
             ListItem::Choice(Choice::new("Return to main menu")),
             ListItem::Separator(None),
             ListItem::Choice(Choice::new("Quit")),
@@ -47,6 +48,13 @@ impl Screen for NextActionScreen {
                             *shared.scrape.lock().unwrap() = None;
                             *shared.like.lock().unwrap() = None;
                             ScreenResult::Reset(Box::new(crate::tui::screens::user_select::UserSelectScreen::new()))
+                        }
+                        "Download from link(s)" => {
+                            // The link screen sets its own scrape state and
+                            // pushes the scraping screen once links are in.
+                            *shared.scrape.lock().unwrap() = None;
+                            *shared.like.lock().unwrap() = None;
+                            ScreenResult::Push(Box::new(crate::tui::screens::link_input::LinkInputScreen::new()))
                         }
                         "Return to main menu" => {
                             *shared.scrape.lock().unwrap() = None;
