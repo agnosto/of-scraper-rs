@@ -31,6 +31,9 @@ pub struct User {
 	#[serde(default)]
 	pub username: String,
 	pub avatar: Option<String>,
+	/// `hasStream` on subscription list items: the creator is broadcasting now.
+	#[serde(default)]
+	pub has_stream: Option<bool>,
 }
 
 #[derive(Deserialize, Debug)]

@@ -109,6 +109,17 @@ pub struct UpdatesConfig {
 	pub check_for_updates: bool,
 }
 
+/// `Livestream { ... }` — livestream recording (`live` / `record` commands).
+#[derive(Debug, Clone, Default)]
+pub struct LivestreamConfig {
+	/// `OutputFormat` — container to convert finished recordings to
+	/// (`original` keeps WebM/MKV as recorded).
+	pub output_format: crate::livestream::OutputFormat,
+	/// `FileNameFormat` — livestream file name template; see
+	/// `livestream::filenames` for tokens. Default `{username}_{recordedAt}`.
+	pub file_name_format: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct FileConfig {
 	pub paid_post_file_name_format: Option<String>,
@@ -151,6 +162,7 @@ pub struct AppConfig {
 	pub ffmpeg_path: Option<PathBuf>,
 	pub metadata: MetadataConfig,
 	pub updates: UpdatesConfig,
+	pub livestream: LivestreamConfig,
 	pub logging_level: LevelFilter,
 }
 
@@ -165,6 +177,7 @@ impl Default for AppConfig {
 			ffmpeg_path: None,
 			metadata: MetadataConfig::default(),
 			updates: UpdatesConfig::default(),
+			livestream: LivestreamConfig::default(),
 			logging_level: LevelFilter::Debug, // matches the pre-config behavior
 		}
 	}
@@ -238,6 +251,13 @@ impl AppConfig {
 		cfg.subscriptions.include_restricted_subscriptions = bool_of(&parsed, "subscriptions", "includerestrictedsubscriptions", false);
 
 		cfg.ffmpeg_path = str_of(&parsed, "external", "ffmpegpath").map(PathBuf::from);
+
+		cfg.livestream.output_format = parsed
+			.get("livestream", "outputformat")
+			.and_then(trim_to_owned)
+			.map(|s| crate::livestream::OutputFormat::parse(&s))
+			.unwrap_or_default();
+		cfg.livestream.file_name_format = str_of(&parsed, "livestream", "filenameformat");
 
 		cfg.performance.timeout = parsed
 			.get("performance", "timeout")
@@ -331,6 +351,8 @@ const DESIRED_KEYS: &[(&str, &str)] = &[
 	("subscriptions", "includeexpiredsubscriptions"),
 	("subscriptions", "includerestrictedsubscriptions"),
 	("external", "ffmpegpath"),
+	("livestream", "outputformat"),
+	("livestream", "filenameformat"),
 	("performance", "timeout"),
 	("performance", "limitdownloadrate"),
 	("performance", "downloadlimitinmbpersec"),
@@ -340,6 +362,7 @@ const DESIRED_KEYS: &[(&str, &str)] = &[
 /// Order in which missing whole sections are written into the user's file.
 const DESIRED_SECTIONS: &[&str] = &[
 	"external",
+	"livestream",
 	"download",
 	"download.media",
 	"metadata",

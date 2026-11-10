@@ -190,6 +190,15 @@ extra level):
 | `IncludeExpiredSubscriptions` | `false` | Also list expired subscriptions in the TUI picker and `list`. |
 | `IncludeRestrictedSubscriptions` | `false` | Also list restricted ones. |
 
+## Livestream
+
+Used by the `live` / `record` commands (see `docs/cli.md`).
+
+| Key | Default | Meaning |
+|---|---|---|
+| `OutputFormat` | `"original"` | Container for finished recordings: `original` keeps WebM (VP8) / MKV (H.264) as recorded (no FFmpeg needed); `mkv` remuxes to Matroska with stream copy; `mp4` re-encodes to H.264/AAC with FFmpeg. |
+| `FileNameFormat` | `"{username}_{recordedAt}"` | Recording file name template (without extension). Tokens: `{id}` (stream id), `{username}`, `{startedAt}`, `{startedAtTime}`, `{recordedAt}`, `{text}` (stream text). Include `{id}`, `{startedAtTime}` or `{recordedAt}` to tell recordings apart. |
+
 ## Performance
 
 | Key | Default | Meaning |

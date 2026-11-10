@@ -8,6 +8,8 @@ pub mod like_options;
 pub mod like_direction;
 pub mod liking;
 pub mod link_input;
+pub mod live_select;
+pub mod recording;
 
 use std::sync::Arc;
 

@@ -78,6 +78,39 @@ Prints your active subscriptions one per line. Add expired/restricted
 subscriptions to the list via the `Subscriptions` config keys
 (see `docs/config.md`).
 
+## live
+
+```
+of-scraper-rs live
+```
+
+Lists the creators you're actively subscribed to who are broadcasting
+right now (`hasStream` on the subscriptions list), one per line as
+`- {username} (id {userId})`. Prints a "none live" line when empty.
+
+## record <user>
+
+```
+of-scraper-rs record <user>
+```
+
+Records a creator's livestream into `<DownloadPath>/<user>/Livestreams`.
+The scraper joins the broadcast through the media vendor's web gateway as
+a receive-only WebRTC viewer (using your own subscription's credentials)
+and writes the publisher's VP8/H.264 video and Opus audio to disk as it
+arrives — WebM for VP8, MKV for H.264, no re-encoding. Recordings that span
+a reconnect or a new stream are split into numbered parts; files are named
+from `Livestream.FileNameFormat` (default `{username}_{recordedAt}`).
+
+Press **Ctrl-C** to stop cleanly: the current file is finalized and, when
+`Livestream.OutputFormat` is `mkv` or `mp4`, converted with FFmpeg (stream
+copy for MKV; H.264/AAC re-encode for MP4). Stream metadata and each saved
+file are recorded in the creator's `Metadata/user_data.db`
+(`livestreams` / `livestream_recordings` tables).
+
+If the creator isn't live, `record` reports that and exits; it does not
+wait/poll for them to go live.
+
 ## like / unlike
 
 ```
@@ -201,6 +234,15 @@ Interactive behavior worth knowing:
   land back on the content-type checklist. Nothing keeps running invisibly.
 - **Like/unlike screen**: `[Q]`/`[Esc]` asks first (`[Y] stop / [N]
   continue`); the run stops between items and returns one screen back.
+- **Livestream screen** (main menu → "Record a livestream"): the creator
+  picker lists your subscriptions with a `● LIVE` badge on broadcasting
+  creators, live ones first; `[R]` refreshes the live status, `[Esc]`
+  goes back. Picking a live creator starts the recording and opens the
+  recording screen (status, duration, bytes written, current file, log);
+  picking one who isn't live shows a notice instead. On the recording
+  screen `[S]`/`[Q]`/`[Esc]` asks first (`[Y] stop / [N] continue`) — a
+  confirmed stop finalizes the current file (and converts it if
+  `Livestream.OutputFormat` is set) before returning to the picker.
 - **After a completed run**: the "what next" screen offers scraping
   another creator, liking another, the main menu, or quitting.
 

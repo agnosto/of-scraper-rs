@@ -132,12 +132,53 @@ pub fn log_like_message(state: &Arc<Mutex<LikeState>>, msg: &str) {
     state.lock().unwrap().log(msg.to_string());
 }
 
+/// Live progress/log state for an in-progress livestream recording. The
+/// `cancel` token is what the recording screen trips to stop cleanly.
+pub struct RecordingState {
+    pub username: String,
+    pub user_id: u64,
+    pub status: String,
+    pub duration_ms: i64,
+    pub bytes_written: u64,
+    pub current_file: Option<String>,
+    pub logs: Vec<String>,
+    pub is_finished: bool,
+    pub cancel: tokio_util::sync::CancellationToken,
+}
+
+impl RecordingState {
+    pub fn new(username: String, user_id: u64) -> Self {
+        Self {
+            username,
+            user_id,
+            status: "Connecting...".to_string(),
+            duration_ms: 0,
+            bytes_written: 0,
+            current_file: None,
+            logs: Vec::new(),
+            is_finished: false,
+            cancel: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+
+    pub fn log(&mut self, msg: String) {
+        info!("{}", msg);
+        if self.logs.len() > 100 {
+            self.logs.remove(0);
+        }
+        self.logs.push(msg);
+    }
+}
+
 /// A creator pulled from `client.get_subscriptions()`, trimmed down to
-/// what the picker screen needs.
+/// what the picker screens need.
 #[derive(Clone, Debug)]
 pub struct CreatorEntry {
+    pub id: u64,
     pub name: String,
     pub username: String,
+    /// `hasStream` on the subscriptions list: broadcasting right now.
+    pub is_live: bool,
 }
 
 /// Which flow the creator picker should hand off to once a creator is
@@ -185,6 +226,9 @@ pub struct SharedState {
     /// Same idea as `scrape`, but for an in-progress like/unlike run.
     pub like: Mutex<Option<Arc<Mutex<LikeState>>>>,
 
+    /// Same idea again, for an in-progress livestream recording.
+    pub recording: Mutex<Option<Arc<Mutex<RecordingState>>>>,
+
     /// Update notice once the (optional, background) check resolves.
     pub update: Mutex<Option<crate::updater::UpdateInfo>>,
 }
@@ -202,6 +246,7 @@ impl SharedState {
             wizard: Mutex::new(WizardSelections::default()),
             scrape: Mutex::new(None),
             like: Mutex::new(None),
+            recording: Mutex::new(None),
             update: Mutex::new(None),
         }
     }
@@ -234,7 +279,12 @@ impl SharedState {
                 Ok(subs) => {
                     let entries = subs
                         .into_iter()
-                        .map(|s| CreatorEntry { name: s.name, username: s.username })
+                        .map(|s| CreatorEntry {
+                            id: s.id,
+                            name: s.name,
+                            username: s.username,
+                            is_live: s.has_stream == Some(true),
+                        })
                         .collect();
                     *slot = LoadState::Loaded(entries);
                 }

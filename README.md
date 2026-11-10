@@ -192,6 +192,9 @@ since the scraper shells out to it for any DRM downloads:
 - **TUI flow**: Main Menu → creator picker (type-to-filter against your
   subscriptions) → content-type checklist → live scrape progress screen
   → "what next" screen (scrape another creator / back to menu / quit).
+  Main Menu → "Record a livestream" → creator picker with `● LIVE` badges
+  (`[R]` refreshes) → recording progress screen (`[S]`/`[Q]` stops after
+  confirmation).
   A failed subscriptions load can be retried in place (`[R]`); aborting a
   running scrape asks for confirmation, drops unstarted queued downloads,
   and waits for the in-flight ones before returning.
@@ -199,8 +202,11 @@ since the scraper shells out to it for any DRM downloads:
   on the main menu.
 - **CLI**: `of-scraper-rs scrape <user> --content-type <type>` and
   `of-scraper-rs list` (lists your subscriptions). No subcommand drops
-  you into the TUI; `link <url>`, `like/unlike` and the `db` group are
-  all documented in **`docs/cli.md`**.
+  you into the TUI; `link <url>`, `like/unlike`, the `db` group, and
+  livestream recording (`live` lists broadcasting creators,
+  `record <user>` saves their stream to `<DownloadPath>/<user>/Livestreams`
+  as WebM/MKV while it arrives, optionally converted per
+  `Livestream.OutputFormat`) are all documented in **`docs/cli.md`**.
 - **Download dedupe across runs**: successful downloads are recorded in
   `state.db` and, with `Download.SkipExistingMedia` (default `true`),
   skipped on later runs; `db backfill` imports files you already have
@@ -212,7 +218,7 @@ since the scraper shells out to it for any DRM downloads:
 
 ## In progress / not implemented
 
-- Avatar/header photo downloads, live stream recording, notification
+- Avatar/header photo downloads, notification
   scraping (the underlying API client has the types for these — see
   `ContentType::Streams`/`Notifications` — but nothing in `main.rs`
   scrapes them yet).

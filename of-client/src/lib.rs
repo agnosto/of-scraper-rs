@@ -12,7 +12,7 @@ mod rules;
 pub use reqwest;
 pub use reqwest_middleware;
 pub use reqwest_cookie_store;
-pub use structs::{content, media, user};
+pub use structs::{content, livestream, media, user};
 
 use log::*;
 use reqwest_cookie_store::CookieStoreRwLock;

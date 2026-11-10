@@ -11,6 +11,7 @@ mod tui;
 mod downloader;
 mod config;
 mod db;
+mod livestream;
 mod metadata;
 mod backfill;
 mod updater;
@@ -76,6 +77,17 @@ enum Commands {
     Db {
         #[command(subcommand)]
         action: DbCommand,
+    },
+    /// List subscribed creators who are broadcasting right now
+    Live,
+    /// Record a creator's livestream into <download>/<user>/Livestreams
+    ///
+    /// Joins the broadcast as a receive-only viewer and writes it to disk
+    /// as it arrives (WebM/MKV, optionally converted per [Livestream]
+    /// OutputFormat). Ctrl-C stops the recording cleanly.
+    Record {
+        /// Username or User ID of the creator to record
+        user: String,
     },
     /// Check GitHub Releases for a newer version (prints a link; never
     /// downloads or replaces anything)
@@ -1637,6 +1649,166 @@ async fn scrape_user_cli(
     Ok(())
 }
 
+/// `record <user>`: resolve the creator, then record their broadcast until it
+/// ends or Ctrl-C is pressed.
+async fn record_cli(client: &OFClient, user: &str) -> anyhow::Result<()> {
+    use tokio_util::sync::CancellationToken;
+
+    let resolved = client
+        .get_user(user)
+        .await
+        .map_err(|e| anyhow!("Failed to resolve creator '{user}': {e}"))?;
+    let user_id = resolved.id;
+    let username = if resolved.username.is_empty() { user.to_string() } else { resolved.username.clone() };
+
+    let download_path = get_download_path();
+    let creator_path = download_path.join(&username);
+    let cfg = config::config();
+    let options = livestream::RecorderOptions {
+        file_name_format: cfg.livestream.file_name_format.clone(),
+        output_format: cfg.livestream.output_format,
+        ffmpeg_path: cfg.ffmpeg_path.clone(),
+    };
+    let user_agent = client.headers.read().unwrap().user_agent.clone();
+    // Edge discovery talks to the media vendor, not the site: unsigned client.
+    let http = reqwest::Client::new();
+
+    let ct = CancellationToken::new();
+    let ct_signal = ct.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            ct_signal.cancel();
+        }
+    });
+
+    let last_state = Arc::new(Mutex::new(None));
+    let progress: livestream::Progress = Box::new(move |status| {
+        let mut last = last_state.lock().unwrap();
+        let show = *last != Some(status.state);
+        *last = Some(status.state);
+        if show || status.state == livestream::RecordingState::Recording {
+            let file = status
+                .current_file
+                .as_ref()
+                .map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())
+                .unwrap_or_default();
+            println!(
+                "[{:?}] {} — {:.1}s, {:.2} MB{}",
+                status.state,
+                status.username,
+                status.duration_ms as f64 / 1000.0,
+                status.bytes_written as f64 / 1_000_000.0,
+                if file.is_empty() { String::new() } else { format!(" — {file}") },
+            );
+        }
+    });
+
+    println!("Recording {username} (id {user_id}) into {}", creator_path.join("Livestreams").display());
+    let result = livestream::record(
+        client,
+        &username,
+        user_id,
+        &creator_path,
+        &options,
+        &user_agent,
+        &http,
+        Some(progress),
+        &ct,
+    )
+    .await?;
+
+    println!(
+        "Recording ended ({:?}): {} file(s), {:.1}s, {:.2} MB",
+        result.reason,
+        result.files.len(),
+        result.duration_ms as f64 / 1000.0,
+        result.bytes as f64 / 1_000_000.0,
+    );
+    for file in &result.files {
+        println!("  {}", file.display());
+    }
+    if let Some(warning) = &result.warning {
+        eprintln!("Warning: {warning}");
+    }
+    Ok(())
+}
+
+/// TUI-side recording engine: runs `livestream::record` for one creator and
+/// mirrors progress into the shared `RecordingState` the recording screen
+/// renders. Mirrors the `run_*_tui` engines above.
+pub async fn run_recording_tui(
+    client: &OFClient,
+    state: Arc<Mutex<tui::app::RecordingState>>,
+    download_path: &std::path::Path,
+) {
+    let (username, user_id, cancel) = {
+        let s = state.lock().unwrap();
+        (s.username.clone(), s.user_id, s.cancel.clone())
+    };
+    let creator_path = download_path.join(&username);
+    let cfg = config::config();
+    let options = livestream::RecorderOptions {
+        file_name_format: cfg.livestream.file_name_format.clone(),
+        output_format: cfg.livestream.output_format,
+        ffmpeg_path: cfg.ffmpeg_path.clone(),
+    };
+    let user_agent = client.headers.read().unwrap().user_agent.clone();
+    // Edge discovery talks to the media vendor, not the site: unsigned client.
+    let http = reqwest::Client::new();
+
+    let progress_state = state.clone();
+    let progress: livestream::Progress = Box::new(move |status| {
+        let mut s = progress_state.lock().unwrap();
+        s.status = format!("{:?}", status.state);
+        s.duration_ms = status.duration_ms;
+        s.bytes_written = status.bytes_written;
+        s.current_file = status
+            .current_file
+            .as_ref()
+            .map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+    });
+
+    let result = livestream::record(
+        client,
+        &username,
+        user_id,
+        &creator_path,
+        &options,
+        &user_agent,
+        &http,
+        Some(progress),
+        &cancel,
+    )
+    .await;
+
+    let mut s = state.lock().unwrap();
+    s.is_finished = true;
+    match result {
+        Ok(result) => {
+            s.status = format!("Finished ({:?})", result.reason);
+            s.duration_ms = result.duration_ms;
+            s.bytes_written = result.bytes;
+            s.log(format!(
+                "Recording ended ({:?}): {} file(s), {:.1}s, {} bytes",
+                result.reason,
+                result.files.len(),
+                result.duration_ms as f64 / 1000.0,
+                result.bytes,
+            ));
+            for file in &result.files {
+                s.log(format!("  saved: {}", file.display()));
+            }
+            if let Some(warning) = &result.warning {
+                s.log(format!("warning: {warning}"));
+            }
+        }
+        Err(e) => {
+            s.status = "Error".to_string();
+            s.log(format!("Recording failed: {e:#}"));
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load config.conf first so init_file_logging and everything else can
@@ -1718,6 +1890,22 @@ async fn main() -> anyhow::Result<()> {
             config::set_metadata_only(metadata_only);
             let downloader = make_downloader(client.clone());
             download_link_cli(&client, downloader, &url).await?;
+        },
+        Some(Commands::Live) => {
+            let cfg = config::config();
+            let live = livestream::list_live(&client, cfg.subscriptions.include_restricted_subscriptions)
+                .await
+                .map_err(|e| anyhow!("Failed to list live creators: {e}"))?;
+            if live.is_empty() {
+                println!("No subscribed creators are live right now.");
+            } else {
+                for (username, id) in live {
+                    println!("- {username} (id {id})");
+                }
+            }
+        },
+        Some(Commands::Record { user }) => {
+            record_cli(&client, &user).await?;
         },
         // Db never reaches here — handled before auth setup.
         Some(Commands::Db { .. }) => unreachable!("db commands are handled before auth setup"),

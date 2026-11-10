@@ -27,6 +27,7 @@ impl MainMenuScreen {
             ListItem::Choice(Choice::new("Scrape ALL purchased content")),
             ListItem::Choice(Choice::new("Download from link(s)")),
             ListItem::Choice(Choice::new("Like/Unlike content")),
+            ListItem::Choice(Choice::new("Record a livestream")),
             ListItem::Separator(None),
             ListItem::Choice(Choice::new("Donate")),
             ListItem::Choice(Choice::new("Quit")),
@@ -92,6 +93,9 @@ impl Screen for MainMenuScreen {
                                 crate::tui::screens::user_select::UserSelectScreen::new(),
                             ))
                         }
+                        "Record a livestream" => ScreenResult::Push(Box::new(
+                            crate::tui::screens::live_select::LiveSelectScreen::new(),
+                        )),
                         _ => ScreenResult::Stay,
                     }
                 } else {

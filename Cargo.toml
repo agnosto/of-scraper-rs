@@ -28,6 +28,7 @@ edition = "2024"
 of-client = { workspace = true }
 deserializers = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+thiserror = { workspace = true }
 anyhow = "1.0.95"
 clap = { version = "4.5.23", features = ["derive"] }
 ratatui = { version = "0.29.0", features = ["all-widgets"] }
@@ -37,7 +38,7 @@ log = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 cookie = "0.18.1"
-reqwest = { workspace = true, features = ["stream"] }
+reqwest = { workspace = true, features = ["stream", "multipart"] }
 chrono = { workspace = true }
 ffmpeg-sidecar = { version = "2.0.5", default-features = false }
 base16 = "0.2"
@@ -51,6 +52,10 @@ qrcode = "0.14.1"
 simplelog = "0.12.2"
 rusqlite = { version = "0.40", features = ["bundled"] }
 regex = "1"
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+rand = "0.9"
+webrtc = "0.14"
+tokio-util = "0.7"
 
 
 

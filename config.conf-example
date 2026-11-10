@@ -19,6 +19,18 @@ External {
   # ffmpeg found on your PATH.
   FFmpegPath = ""
 }
+# Livestream Recording (live / record commands)
+Livestream {
+  # Container to convert finished recordings to:
+  #   original = keep WebM (VP8) / MKV (H.264) as recorded, no FFmpeg needed
+  #   mkv      = Matroska, streams copied
+  #   mp4      = H.264 + AAC (VP8/Opus are re-encoded with FFmpeg)
+  OutputFormat = "original"
+  # File name template for recordings (without extension). Tokens:
+  # {id} {username} {startedAt} {startedAtTime} {recordedAt} {text}.
+  # Include {id}, {startedAtTime} or {recordedAt} to tell recordings apart.
+  FileNameFormat = "{username}_{recordedAt}"
+}
 # Download Settings
 Download {
   Media {
