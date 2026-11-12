@@ -143,6 +143,9 @@ pub struct RecordingState {
     pub current_file: Option<String>,
     pub logs: Vec<String>,
     pub is_finished: bool,
+    /// One-line result shown on the creator picker after the recording screen
+    /// closes (the recording screen's logs are gone by then).
+    pub outcome: Option<String>,
     pub cancel: tokio_util::sync::CancellationToken,
 }
 
@@ -157,6 +160,7 @@ impl RecordingState {
             current_file: None,
             logs: Vec::new(),
             is_finished: false,
+            outcome: None,
             cancel: tokio_util::sync::CancellationToken::new(),
         }
     }
@@ -229,6 +233,10 @@ pub struct SharedState {
     /// Same idea again, for an in-progress livestream recording.
     pub recording: Mutex<Option<Arc<Mutex<RecordingState>>>>,
 
+    /// Result of the last finished recording, handed from the recording
+    /// screen to the creator picker (which consumes it as a notice).
+    pub last_recording: Mutex<Option<String>>,
+
     /// Update notice once the (optional, background) check resolves.
     pub update: Mutex<Option<crate::updater::UpdateInfo>>,
 }
@@ -247,6 +255,7 @@ impl SharedState {
             scrape: Mutex::new(None),
             like: Mutex::new(None),
             recording: Mutex::new(None),
+            last_recording: Mutex::new(None),
             update: Mutex::new(None),
         }
     }

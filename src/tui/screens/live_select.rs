@@ -53,6 +53,12 @@ impl LiveSelectScreen {
 
 impl Screen for LiveSelectScreen {
     fn tick(&mut self, shared: &Arc<SharedState>) -> ScreenResult {
+        // A recording that just ended hands its one-line result back here.
+        // Consume it once so it does not stick to the picker forever.
+        if let Some(message) = shared.last_recording.lock().unwrap().take() {
+            self.notice = Some(message);
+        }
+
         if matches!(self.inner, Inner::NotStarted) {
             SharedState::spawn_fetch_subscriptions(shared);
             self.inner = Inner::Loading;
@@ -95,6 +101,9 @@ impl Screen for LiveSelectScreen {
                     live_count,
                     sorted.len()
                 );
+                // The refresh finished; the "Refreshing live status..." notice
+                // is stale now.
+                self.notice = None;
                 self.inner = Inner::Ready(FuzzySelect::new(title, fuzzy_entries));
             }
         }

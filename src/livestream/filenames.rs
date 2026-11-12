@@ -68,7 +68,13 @@ fn flatten_text(text: Option<&str>) -> String {
 		.filter(|part| !part.is_empty())
 		.collect::<Vec<_>>()
 		.join(" ");
-	if flat.len() > TEXT_LENGTH_LIMIT { flat[..TEXT_LENGTH_LIMIT].trim().to_string() } else { flat }
+	// Limit by characters, not bytes: slicing at a byte offset can split a
+	// multi-byte UTF-8 character (and panic) when the title has emoji.
+	if flat.chars().count() > TEXT_LENGTH_LIMIT {
+		flat.chars().take(TEXT_LENGTH_LIMIT).collect::<String>().trim().to_string()
+	} else {
+		flat
+	}
 }
 
 pub fn remove_invalid_file_name_chars(name: &str) -> String {
@@ -95,5 +101,14 @@ mod tests {
 		let recorded = Local::now();
 		let name = build(Some("{id}-{username}-{text}"), Some(42), "bo/b", None, recorded, Some("hi\nthere"));
 		assert_eq!(name, "42-bob-hi there");
+	}
+
+	#[test]
+	fn text_truncation_does_not_split_multibyte_characters() {
+		let recorded = Local::now();
+		// 160 emoji = 640 bytes; a byte-based cut at 100 would panic.
+		let text = "🎬".repeat(160);
+		let name = build(Some("{text}"), None, "u", None, recorded, Some(&text));
+		assert_eq!(name.chars().count(), TEXT_LENGTH_LIMIT);
 	}
 }

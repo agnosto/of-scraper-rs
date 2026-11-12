@@ -64,22 +64,20 @@ pub fn build_choose_server_request(credentials: &AgoraCredentials, session_id: &
 	})
 }
 
-/// Reads the gateway edges from a choose-server response, or `None` when none were granted.
-pub fn parse_choose_server_response(body: &str) -> Result<Option<AgoraGatewayInfo>, serde_json::Error> {
+/// Reads the gateway edges from a choose-server response, or `None` when none
+/// were granted. The second value is the gateway's own error code when it
+/// declined the request (0 when it did not report one), so callers can put it
+/// in the failure message.
+pub fn parse_choose_server_response(body: &str) -> Result<(Option<AgoraGatewayInfo>, i64), serde_json::Error> {
 	let response: Value = serde_json::from_str(body)?;
-	let gateway = response["response_body"]
-		.as_array()
-		.and_then(|items| {
-			items.iter().find_map(|item| {
-				let buffer = item.get("buffer")?;
-				if buffer.get("flag").and_then(Value::as_i64) == Some(GATEWAY_FLAG) {
-					Some(buffer)
-				} else {
-					None
-				}
-			})
+	let Some(gateway) = response["response_body"].as_array().and_then(|items| {
+		items.iter().find_map(|item| {
+			let buffer = item.get("buffer")?;
+			(buffer.get("flag").and_then(Value::as_i64) == Some(GATEWAY_FLAG)).then_some(buffer)
 		})
-		.ok_or_else(|| serde_json::Error::io(std::io::Error::new(std::io::ErrorKind::InvalidData, "no gateway buffer")))?;
+	}) else {
+		return Ok((None, 0));
+	};
 
 	let error_code = gateway.get("code").and_then(Value::as_i64).unwrap_or(0);
 	let ticket = gateway.get("cert").and_then(Value::as_str).unwrap_or("").to_string();
@@ -100,7 +98,7 @@ pub fn parse_choose_server_response(body: &str) -> Result<Option<AgoraGatewayInf
 	}
 
 	if error_code != 0 || edges.is_empty() {
-		return Ok(None);
+		return Ok((None, error_code));
 	}
 
 	let mut detail = gateway
@@ -122,7 +120,7 @@ pub fn parse_choose_server_response(body: &str) -> Result<Option<AgoraGatewayInf
 		"opid": response.get("opid"),
 		"cert": ticket,
 	});
-	Ok(Some(AgoraGatewayInfo { ap_response, edges }))
+	Ok((Some(AgoraGatewayInfo { ap_response, edges }), error_code))
 }
 
 fn merge(into: &mut Value, from: &Value) {
@@ -519,7 +517,9 @@ mod tests {
 			}],
 			"detail": {"x": "y"}
 		}"#;
-		let info = parse_choose_server_response(body).unwrap().unwrap();
+		let (info, code) = parse_choose_server_response(body).unwrap();
+		assert_eq!(code, 0);
+		let info = info.unwrap();
 		assert_eq!(info.edges.len(), 1);
 		assert_eq!(info.edges[0].gateway_uri(), "wss://1-2-3-4.edge.agora.io:443");
 		assert_eq!(info.ap_response["cert"], json!("ticket"));
@@ -527,9 +527,19 @@ mod tests {
 	}
 
 	#[test]
-	fn choose_server_response_without_gateway_is_none() {
+	fn choose_server_response_without_gateway_reports_the_code() {
 		let body = r#"{"response_body": [{"buffer": {"flag": 4096, "code": 1, "edges_services": []}}]}"#;
-		assert!(parse_choose_server_response(body).unwrap().is_none());
+		let (gateway, code) = parse_choose_server_response(body).unwrap();
+		assert!(gateway.is_none());
+		assert_eq!(code, 1);
+	}
+
+	#[test]
+	fn response_without_a_gateway_buffer_reports_no_code() {
+		let body = r#"{"response_body": []}"#;
+		let (gateway, code) = parse_choose_server_response(body).unwrap();
+		assert!(gateway.is_none());
+		assert_eq!(code, 0);
 	}
 
 	#[test]

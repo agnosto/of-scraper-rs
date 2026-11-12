@@ -146,7 +146,18 @@ pub async fn record(
 		let credentials = match client.get_stream_credentials(user_id).await {
 			Ok(Some(credentials)) => credentials,
 			Ok(None) => {
-				reason = if muxer.is_started() { EndReason::Ended } else { EndReason::NotLive };
+				if muxer.is_started() {
+					reason = EndReason::Ended;
+				} else {
+					// The TUI's "Enter did nothing" case: the subscription list
+					// said LIVE, but the site would not hand out viewer
+					// credentials. Log it explicitly so a failed attempt is
+					// explainable without the CLI.
+					warn!(
+						"No livestream viewer credentials for {username} (not live any more, stream ended, or not viewable by this account); nothing was recorded."
+					);
+					reason = EndReason::NotLive;
+				}
 				break;
 			}
 			Err(e) => {

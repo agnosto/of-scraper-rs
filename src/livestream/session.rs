@@ -371,10 +371,13 @@ async fn choose_server(
 	let mut last_code = 0i64;
 	for host in protocol::CHOOSE_SERVER_HOSTS {
 		match try_host(http, host, &request).await {
-			Ok(Some(gateway)) => return Ok(gateway),
-			Ok(None) => {
-				// A granted-but-failed gateway reports its code in the response.
-				last_code = -1;
+			Ok((Some(gateway), _)) => return Ok(gateway),
+			Ok((None, code)) => {
+				// A granted-but-failed gateway reports its code in the response;
+				// keep the last real one for the final error message.
+				if code != 0 {
+					last_code = code;
+				}
 			}
 			Err(e) => warn!("Media edge discovery failed at {host}: {e}"),
 		}
@@ -386,11 +389,11 @@ async fn try_host(
 	http: &reqwest::Client,
 	host: &str,
 	request: &serde_json::Value,
-) -> Result<Option<AgoraGatewayInfo>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(Option<AgoraGatewayInfo>, i64), Box<dyn std::error::Error + Send + Sync>> {
 	let form = reqwest::multipart::Form::new().text("request", request.to_string());
 	let response = http.post(protocol::choose_server_url(host)).multipart(form).send().await?;
 	if !response.status().is_success() {
-		return Ok(None);
+		return Ok((None, 0));
 	}
 	let body = response.text().await?;
 	Ok(protocol::parse_choose_server_response(&body)?)

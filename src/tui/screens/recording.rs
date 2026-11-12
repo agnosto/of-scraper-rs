@@ -39,6 +39,20 @@ impl RecordingScreen {
     }
 }
 
+/// Hands the finished recording's one-line result to the creator picker and
+/// releases the shared recording slot. Without this, a recording that ends
+/// immediately (for example, "not live") would silently bounce back to the
+/// picker with no indication of what happened.
+fn close_and_pop(shared: &Arc<SharedState>) -> ScreenResult {
+    if let Some(recording) = shared.recording.lock().unwrap().take() {
+        let outcome = recording.lock().unwrap().outcome.clone();
+        if let Some(outcome) = outcome {
+            *shared.last_recording.lock().unwrap() = Some(outcome);
+        }
+    }
+    ScreenResult::Pop
+}
+
 impl Screen for RecordingScreen {
     fn tick(&mut self, shared: &Arc<SharedState>) -> ScreenResult {
         if self.transitioned {
@@ -50,10 +64,9 @@ impl Screen for RecordingScreen {
             .unwrap_or(false);
         if is_finished {
             self.transitioned = true;
-            // Recording ended (finished or stopped): clear the slot and go
-            // back to the creator picker.
-            *shared.recording.lock().unwrap() = None;
-            return ScreenResult::Pop;
+            // Recording ended (finished or stopped): go back to the creator
+            // picker with a one-line result of what happened.
+            return close_and_pop(shared);
         }
         ScreenResult::Stay
     }
@@ -83,8 +96,7 @@ impl Screen for RecordingScreen {
                     .map(|s| s.lock().unwrap().is_finished)
                     .unwrap_or(true);
                 if is_finished || self.stopped {
-                    *shared.recording.lock().unwrap() = None;
-                    return ScreenResult::Pop;
+                    return close_and_pop(shared);
                 }
                 self.confirming_stop = true;
                 ScreenResult::Stay

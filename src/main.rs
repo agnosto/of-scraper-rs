@@ -1801,10 +1801,25 @@ pub async fn run_recording_tui(
             if let Some(warning) = &result.warning {
                 s.log(format!("warning: {warning}"));
             }
+            s.outcome = Some(if result.files.is_empty() {
+                match result.reason {
+                    livestream::EndReason::NotLive => format!(
+                        "@{username}: not live anymore (or the broadcast is not viewable by this account) — no file was written. [R] refresh"
+                    ),
+                    reason => format!("@{username}: recording ended ({reason:?}) without a file."),
+                }
+            } else {
+                format!(
+                    "@{username}: saved {} file(s) ({:.1} MB).",
+                    result.files.len(),
+                    result.bytes as f64 / 1_000_000.0,
+                )
+            });
         }
         Err(e) => {
             s.status = "Error".to_string();
             s.log(format!("Recording failed: {e:#}"));
+            s.outcome = Some(format!("@{username}: recording failed — {e:#}"));
         }
     }
 }

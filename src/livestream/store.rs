@@ -89,6 +89,12 @@ pub fn upsert_livestream(creator_path: &Path, record: &LivestreamRecord) {
 	}
 }
 
+/// The schema stores duration in seconds (as SubScraper's mapper does), while
+/// live timing is tracked in milliseconds.
+fn duration_seconds(duration_ms: i64) -> i64 {
+	duration_ms / 1000
+}
+
 /// One row per saved file.
 pub fn add_recording(creator_path: &Path, record: &RecordingRecord) {
 	let result = open(creator_path).and_then(|conn| {
@@ -101,7 +107,7 @@ pub fn add_recording(creator_path: &Path, record: &RecordingRecord) {
 				record.directory,
 				record.filename,
 				record.size as i64,
-				record.duration_ms,
+				duration_seconds(record.duration_ms),
 				record.recording_started_at.to_rfc3339(),
 				record.recording_finished_at.to_rfc3339(),
 				record.end_reason,
@@ -113,5 +119,17 @@ pub fn add_recording(creator_path: &Path, record: &RecordingRecord) {
 	});
 	if let Err(e) = result {
 		log::warn!("Could not store livestream recording row for {}: {e}", creator_path.display());
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::duration_seconds;
+
+	#[test]
+	fn durations_are_stored_in_seconds() {
+		assert_eq!(duration_seconds(0), 0);
+		assert_eq!(duration_seconds(1_500), 1);
+		assert_eq!(duration_seconds(65_400), 65);
 	}
 }

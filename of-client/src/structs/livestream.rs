@@ -64,6 +64,16 @@ pub struct StreamInfo {
 const STREAM_URL_EXTENSION_ENCODED: &str =
 	"%7B%22streamtype%22%3A%22agora_direct%22%2C%22sbp%22%3Atrue%2C%22preferred_servers%22%3A%5B%5D%7D";
 
+/// A stream is joinable only when the site returned a complete credential
+/// set. Treating a half-empty one as valid only produces a confusing gateway
+/// failure later.
+fn usable_credentials(credentials: AgoraCredentials) -> Option<AgoraCredentials> {
+	let complete = !credentials.app_id.trim().is_empty()
+		&& !credentials.channel.trim().is_empty()
+		&& !credentials.token.trim().is_empty();
+	complete.then_some(credentials)
+}
+
 /// Status code of a middleware error, when the failure was a response.
 fn error_status(err: &reqwest_middleware::Error) -> Option<reqwest::StatusCode> {
 	match err {
@@ -98,7 +108,7 @@ impl OFClient {
 			Ok(response) => {
 				let dto: ActiveStreamUrl = response.json().await?;
 				Ok(match dto.message {
-					Some(m) if m.success => m.agora_credentials,
+					Some(m) if m.success => m.agora_credentials.and_then(usable_credentials),
 					_ => None,
 				})
 			}
@@ -156,6 +166,20 @@ mod tests {
 		assert_eq!(cred.channel, "chan");
 		assert_eq!(cred.token, "tok");
 		assert_eq!(cred.user_id, 42);
+	}
+
+	#[test]
+	fn incomplete_credentials_are_rejected() {
+		let json = r#"{"message":{"success":true,"agora_cred":{"app_id":"abc","channel":"chan","token":"  ","user_id":42}}}"#;
+		let dto: ActiveStreamUrl = serde_json::from_str(json).unwrap();
+		assert!(dto.message.unwrap().agora_credentials.and_then(usable_credentials).is_none());
+	}
+
+	#[test]
+	fn complete_credentials_are_accepted() {
+		let json = r#"{"message":{"success":true,"agora_cred":{"app_id":"abc","channel":"chan","token":"tok","user_id":42}}}"#;
+		let dto: ActiveStreamUrl = serde_json::from_str(json).unwrap();
+		assert!(dto.message.unwrap().agora_credentials.and_then(usable_credentials).is_some());
 	}
 
 	#[test]
