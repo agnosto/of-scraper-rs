@@ -151,11 +151,26 @@ pub async fn record(
 				} else {
 					// The TUI's "Enter did nothing" case: the subscription list
 					// said LIVE, but the site would not hand out viewer
-					// credentials. Log it explicitly so a failed attempt is
-					// explainable without the CLI.
-					warn!(
-						"No livestream viewer credentials for {username} (not live any more, stream ended, or not viewable by this account); nothing was recorded."
-					);
+					// credentials. The stream endpoint says whether a broadcast
+					// is still reported -- and its price -- which is usually
+					// the reason (an unpurchased paid stream).
+					match try_get_stream_info(client, user_id).await {
+						Some(info) => {
+							let price = info.price.unwrap_or(0.0);
+							let hint = if price > 0.0 {
+								format!(" This is a paid stream ({price:.2}); purchase it on the site first.")
+							} else {
+								String::new()
+							};
+							warn!(
+								"No livestream viewer credentials for {username}: the site still reports active stream {} (active {}, finished {}).{hint} Nothing was recorded.",
+								info.id, info.is_active, info.is_finished,
+							);
+						}
+						None => warn!(
+							"No livestream viewer credentials for {username}, and the site reports no active stream either; nothing was recorded."
+						),
+					}
 					reason = EndReason::NotLive;
 				}
 				break;

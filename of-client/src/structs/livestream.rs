@@ -5,6 +5,7 @@
 //! the caller, not here.
 
 use chrono::{DateTime, Utc};
+use log::warn;
 use serde::Deserialize;
 
 use crate::OFClient;
@@ -74,6 +75,42 @@ fn usable_credentials(credentials: AgoraCredentials) -> Option<AgoraCredentials>
 	complete.then_some(credentials)
 }
 
+/// The site can decline a credentials request with a normal 200 response, so
+/// this is logged (with secrets hidden) when recording cannot start.
+fn sanitized_body(body: &str) -> String {
+	let mut value: serde_json::Value = match serde_json::from_str(body) {
+		Ok(value) => value,
+		Err(_) => return format!("<non-JSON body, {} bytes>", body.len()),
+	};
+	redact(&mut value);
+	let text = value.to_string();
+	if text.chars().count() > 2_000 {
+		text.chars().take(2_000).collect::<String>() + "…"
+	} else {
+		text
+	}
+}
+
+fn redact(value: &mut serde_json::Value) {
+	match value {
+		serde_json::Value::Object(map) => {
+			for (key, value) in map.iter_mut() {
+				let key = key.to_ascii_lowercase();
+				if ["token", "key", "secret", "cert", "cookie", "auth", "signature"]
+					.iter()
+					.any(|needle| key.contains(needle))
+				{
+					*value = serde_json::Value::String("<redacted>".to_string());
+				} else {
+					redact(value);
+				}
+			}
+		}
+		serde_json::Value::Array(items) => items.iter_mut().for_each(redact),
+		_ => {}
+	}
+}
+
 /// Status code of a middleware error, when the failure was a response.
 fn error_status(err: &reqwest_middleware::Error) -> Option<reqwest::StatusCode> {
 	match err {
@@ -106,11 +143,25 @@ impl OFClient {
 		);
 		match self.get(url).send().await {
 			Ok(response) => {
-				let dto: ActiveStreamUrl = response.json().await?;
-				Ok(match dto.message {
-					Some(m) if m.success => m.agora_credentials.and_then(usable_credentials),
-					_ => None,
-				})
+				let body = response.text().await?;
+				let dto: ActiveStreamUrl = serde_json::from_str(&body).map_err(reqwest_middleware::Error::middleware)?;
+				match dto.message {
+					Some(message) if message.success => match message.agora_credentials.and_then(usable_credentials) {
+						Some(credentials) => Ok(Some(credentials)),
+						None => {
+							warn!("Livestream viewer credentials were empty; the site answered: {}", sanitized_body(&body));
+							Ok(None)
+						}
+					},
+					Some(_) => {
+						warn!("The site declined livestream viewer credentials: {}", sanitized_body(&body));
+						Ok(None)
+					}
+					None => {
+						warn!("The site returned no livestream message: {}", sanitized_body(&body));
+						Ok(None)
+					}
+				}
 			}
 			Err(err) => match error_status(&err) {
 				Some(reqwest::StatusCode::NOT_FOUND) | Some(reqwest::StatusCode::BAD_REQUEST) => Ok(None),
@@ -187,6 +238,28 @@ mod tests {
 		// {"streamtype":"agora_direct","sbp":true,"preferred_servers":[]} percent-encoded.
 		let decoded = urlencoding_decode(STREAM_URL_EXTENSION_ENCODED);
 		assert_eq!(decoded, r#"{"streamtype":"agora_direct","sbp":true,"preferred_servers":[]}"#);
+	}
+
+	#[test]
+	fn diagnostics_keep_the_reason_but_hide_secrets() {
+		let body = r#"{"message":{"success":false,"reason":"purchase_required","agora_cred":{"token":"secret-token","app_id":"app"}}}"#;
+		let text = sanitized_body(body);
+		assert!(text.contains("purchase_required"));
+		assert!(text.contains(r#""app_id":"app""#));
+		assert!(!text.contains("secret-token"));
+	}
+
+	#[test]
+	fn credentials_url_signs_the_extension_exactly_as_sent() {
+		// The middleware signs `path?query` from the parsed URL, so the parser
+		// must hand back the extension bytes unchanged.
+		let url = reqwest::Url::parse(&format!(
+			"https://onlyfans.com/api2/v2/users/1/streams/active/url?extension={STREAM_URL_EXTENSION_ENCODED}"
+		))
+		.unwrap();
+		assert_eq!(url.path(), "/api2/v2/users/1/streams/active/url");
+		let expected = format!("extension={STREAM_URL_EXTENSION_ENCODED}");
+		assert_eq!(url.query(), Some(expected.as_str()));
 	}
 
 	fn urlencoding_decode(s: &str) -> String {
