@@ -26,6 +26,10 @@ pub struct AgoraCredentials {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ActiveStreamMessage {
+	// The site sends `Success`/`Message` in PascalCase. Newtonsoft matched
+	// those case-insensitively in SubScraper; serde does not, so accept both
+	// spellings (and keep the lowercase one for older responses).
+	#[serde(alias = "Success")]
 	pub success: bool,
 	#[serde(rename = "agora_cred")]
 	pub agora_credentials: Option<AgoraCredentials>,
@@ -33,6 +37,7 @@ pub struct ActiveStreamMessage {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ActiveStreamUrl {
+	#[serde(alias = "Message")]
 	pub message: Option<ActiveStreamMessage>,
 }
 
@@ -61,9 +66,10 @@ pub struct StreamInfo {
 /// The `extension` query value of the active-stream-url endpoint, URL-encoded
 /// exactly as it must be sent: the request signature covers the query string
 /// verbatim, so it is appended to the URL pre-encoded instead of going
-/// through a query builder that would re-encode it.
+/// through a query builder that would re-encode it. Matches the current web
+/// player's viewer request (`{streamtype, sbp}`).
 const STREAM_URL_EXTENSION_ENCODED: &str =
-	"%7B%22streamtype%22%3A%22agora_direct%22%2C%22sbp%22%3Atrue%2C%22preferred_servers%22%3A%5B%5D%7D";
+	"%7B%22streamtype%22%3A%22agora_direct%22%2C%22sbp%22%3Atrue%7D";
 
 /// A stream is joinable only when the site returned a complete credential
 /// set. Treating a half-empty one as valid only produces a confusing gateway
@@ -96,7 +102,7 @@ fn redact(value: &mut serde_json::Value) {
 		serde_json::Value::Object(map) => {
 			for (key, value) in map.iter_mut() {
 				let key = key.to_ascii_lowercase();
-				if ["token", "key", "secret", "cert", "cookie", "auth", "signature"]
+				if ["token", "key", "secret", "cert", "cookie", "auth", "signature", "channel", "streamname"]
 					.iter()
 					.any(|needle| key.contains(needle))
 				{
@@ -220,6 +226,35 @@ mod tests {
 	}
 
 	#[test]
+	fn active_stream_url_accepts_the_pascal_case_response() {
+		// Shape used by the current web player: top-level Token/Message,
+		// capitalised Success, lower-case agora_cred.
+		let json = r#"{
+			"Token":"aaaa",
+			"Message":{
+				"MsgType":"agora_direct","Success":true,
+				"agora_cred":{"app_id":"abc","channel":"chan","streamname":"stream","token":"tok","user_id":42},
+				"sbp":{"endpoint":"https://example","token":"s","sbp_session":"x"}
+			}
+		}"#;
+		let dto: ActiveStreamUrl = serde_json::from_str(json).unwrap();
+		let message = dto.message.expect("Message must be recognised");
+		assert!(message.success);
+		let cred = message.agora_credentials.and_then(usable_credentials).expect("credentials");
+		assert_eq!(cred.app_id, "abc");
+		assert_eq!(cred.channel, "chan");
+		assert_eq!(cred.token, "tok");
+		assert_eq!(cred.user_id, 42);
+	}
+
+	#[test]
+	fn active_stream_url_still_accepts_the_lower_case_response() {
+		let json = r#"{"message":{"success":true,"agora_cred":{"app_id":"abc","channel":"chan","token":"tok","user_id":42}}}"#;
+		let dto: ActiveStreamUrl = serde_json::from_str(json).unwrap();
+		assert!(dto.message.unwrap().success);
+	}
+
+	#[test]
 	fn incomplete_credentials_are_rejected() {
 		let json = r#"{"message":{"success":true,"agora_cred":{"app_id":"abc","channel":"chan","token":"  ","user_id":42}}}"#;
 		let dto: ActiveStreamUrl = serde_json::from_str(json).unwrap();
@@ -235,9 +270,9 @@ mod tests {
 
 	#[test]
 	fn extension_param_matches_the_site_expectation() {
-		// {"streamtype":"agora_direct","sbp":true,"preferred_servers":[]} percent-encoded.
+		// {"streamtype":"agora_direct","sbp":true} percent-encoded.
 		let decoded = urlencoding_decode(STREAM_URL_EXTENSION_ENCODED);
-		assert_eq!(decoded, r#"{"streamtype":"agora_direct","sbp":true,"preferred_servers":[]}"#);
+		assert_eq!(decoded, r#"{"streamtype":"agora_direct","sbp":true}"#);
 	}
 
 	#[test]
