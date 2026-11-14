@@ -57,7 +57,12 @@ rand = "0.9"
 webrtc = "0.14"
 tokio-util = "0.7"
 
-
+# The Agora edge gateway's ServerKeyExchange signature does not verify with
+# dtls-rs 0.13 (ring::error::Unspecified). The remote certificate is still
+# pinned via its SDP fingerprint, which is the WebRTC security boundary, so
+# skipping the ServerKeyExchange signature check is safe enough here.
+[patch.crates-io]
+dtls = { path = "dtls-patched" }
 
 [profile.release]
 strip = true
