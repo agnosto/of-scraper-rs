@@ -63,6 +63,7 @@ tokio-util = "0.7"
 # skipping the ServerKeyExchange signature check is safe enough here.
 [patch.crates-io]
 dtls = { path = "dtls-patched" }
+webrtc = { path = "webrtc-patched" }
 
 [profile.release]
 strip = true
