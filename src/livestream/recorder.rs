@@ -330,7 +330,12 @@ async fn finish_files(
 	}
 
 	let mut warning = None;
-	if options.output_format != OutputFormat::Original && !files.lock().unwrap().is_empty() {
+	if files.lock().unwrap().is_empty() {
+		// Nothing to convert.
+	} else if options.output_format == OutputFormat::Original {
+		info!("Livestream output format is original; keeping recorded file(s) without conversion");
+	} else {
+		info!("Converting {} livestream recording(s) to {:?}", files.lock().unwrap().len(), options.output_format);
 		report(RecordingState::Converting, 0, 0);
 		let paths: Vec<PathBuf> = files.lock().unwrap().iter().map(|f| f.path.clone()).collect();
 		for path in paths {

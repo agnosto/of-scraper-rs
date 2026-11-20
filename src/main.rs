@@ -225,12 +225,95 @@ impl CustomConfig {
     }
 }
 
+const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+const LOG_MAX_ROTATED: usize = 5;
+
+struct RotatingLogFile {
+    path: PathBuf,
+    file: fs::File,
+    size: u64,
+}
+
+impl RotatingLogFile {
+    fn open(path: PathBuf) -> std::io::Result<Self> {
+        Self::rotate_if_needed(&path)?;
+        Self::open_current(path)
+    }
+
+    fn open_current(path: PathBuf) -> std::io::Result<Self> {
+        let file = fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+        Ok(Self { path, file, size })
+    }
+
+    fn rotate_if_needed(path: &Path) -> std::io::Result<()> {
+        let size = match fs::metadata(path) {
+            Ok(m) => m.len(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        if size < LOG_MAX_BYTES {
+            return Ok(());
+        }
+        Self::rotate_files(path)
+    }
+
+    fn rotate_files(path: &Path) -> std::io::Result<()> {
+        let rotated = |n: usize| PathBuf::from(format!("{}.{}", path.display(), n));
+        let oldest = rotated(LOG_MAX_ROTATED);
+        if oldest.exists() {
+            let _ = fs::remove_file(&oldest);
+        }
+        for n in (1..LOG_MAX_ROTATED).rev() {
+            let from = rotated(n);
+            let to = rotated(n + 1);
+            if from.exists() {
+                let _ = fs::rename(&from, &to);
+            }
+        }
+        if path.exists() {
+            let _ = fs::rename(path, rotated(1));
+        }
+        Ok(())
+    }
+
+    fn rotate_now(&mut self) -> std::io::Result<()> {
+        // Close the current handle before renaming (important on Windows).
+        std::io::Write::flush(&mut self.file)?;
+        let devnull = if cfg!(windows) { "NUL" } else { "/dev/null" };
+        drop(std::mem::replace(
+            &mut self.file,
+            fs::OpenOptions::new().write(true).open(devnull)?,
+        ));
+        Self::rotate_files(&self.path)?;
+        self.file = fs::OpenOptions::new().create(true).write(true).truncate(true).open(&self.path)?;
+        self.size = 0;
+        Ok(())
+    }
+}
+
+impl std::io::Write for RotatingLogFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.size >= LOG_MAX_BYTES {
+            let _ = self.rotate_now();
+        }
+        let n = std::io::Write::write(&mut self.file, buf)?;
+        self.size = self.size.saturating_add(n as u64);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::Write::flush(&mut self.file)
+    }
+}
+
 fn init_file_logging() -> anyhow::Result<PathBuf> {
     let log_path = resolve_config_path("of-scraper-rs.log");
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let file = fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
+    let file = RotatingLogFile::open(log_path.clone())
+        .map_err(|e| anyhow!("Failed to open log file {}: {e}", log_path.display()))?;
 
     let level = config::config().logging_level;
     simplelog::WriteLogger::init(level, simplelog::Config::default(), file)
@@ -238,6 +321,35 @@ fn init_file_logging() -> anyhow::Result<PathBuf> {
 
     info!("=== of-scraper-rs v{} starting ===", env!("CARGO_PKG_VERSION"));
     Ok(log_path)
+}
+
+fn log_ffmpeg_availability() {
+    let configured = config::config()
+        .ffmpeg_path
+        .as_deref()
+        .filter(|p| !p.as_os_str().is_empty());
+    let (effective, source) = match configured {
+        Some(path) if path.exists() => (path.to_path_buf(), "configured"),
+        _ => (PathBuf::from("ffmpeg"), "PATH"),
+    };
+
+    if ffmpeg_works(&effective) {
+        match source {
+            "configured" => info!("FFmpeg available (configured): {}", effective.display()),
+            _ => info!("FFmpeg available (PATH)"),
+        }
+    }
+}
+
+fn ffmpeg_works(program: &Path) -> bool {
+    std::process::Command::new(program)
+        .arg("-version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 pub(crate) fn resolve_config_path(filename: &str) -> PathBuf {
@@ -1663,12 +1775,17 @@ async fn record_cli(client: &OFClient, user: &str) -> anyhow::Result<()> {
 
     let download_path = get_download_path();
     let creator_path = download_path.join(&username);
-    let cfg = config::config();
+    // Load fresh so config edits made before starting this recording take effect.
+    let cfg = config::AppConfig::load();
     let options = livestream::RecorderOptions {
         file_name_format: cfg.livestream.file_name_format.clone(),
         output_format: cfg.livestream.output_format,
         ffmpeg_path: cfg.ffmpeg_path.clone(),
     };
+    info!(
+        "Livestream options for @{username}: output_format={:?}, ffmpeg_path={:?}",
+        options.output_format, options.ffmpeg_path
+    );
     let user_agent = client.headers.read().unwrap().user_agent.clone();
     // Edge discovery talks to the media vendor, not the site: unsigned client.
     let http = reqwest::Client::new();
@@ -1746,12 +1863,24 @@ pub async fn run_recording_tui(
         (s.username.clone(), s.user_id, s.cancel.clone())
     };
     let creator_path = download_path.join(&username);
-    let cfg = config::config();
+    // Load fresh so config edits made while the TUI is open take effect.
+    let cfg = config::AppConfig::load();
     let options = livestream::RecorderOptions {
         file_name_format: cfg.livestream.file_name_format.clone(),
         output_format: cfg.livestream.output_format,
         ffmpeg_path: cfg.ffmpeg_path.clone(),
     };
+    {
+        let mut s = state.lock().unwrap();
+        s.log(format!(
+            "Livestream options: output_format={:?}, ffmpeg_path={:?}",
+            options.output_format, options.ffmpeg_path
+        ));
+    }
+    info!(
+        "Livestream options for @{username}: output_format={:?}, ffmpeg_path={:?}",
+        options.output_format, options.ffmpeg_path
+    );
     let user_agent = client.headers.read().unwrap().user_agent.clone();
     // Edge discovery talks to the media vendor, not the site: unsigned client.
     let http = reqwest::Client::new();
@@ -1831,6 +1960,7 @@ async fn main() -> anyhow::Result<()> {
     let _cfg = config::config();
 
     let log_path = init_file_logging().context("Setting up logging")?;
+    log_ffmpeg_availability();
 
     let cli = Cli::parse();
 
