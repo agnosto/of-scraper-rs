@@ -104,23 +104,72 @@ impl LiveSession {
 				let audio_tx = audio_tx.clone();
 				let video_payload_types = video_payload_types.clone();
 				Box::pin(async move {
-					let is_video = track.kind() == RTPCodecType::Video;
-					while let Ok((packet, _attributes)) = track.read_rtp().await {
-						let info = RtpPacketInfo {
-							sequence_number: packet.header.sequence_number,
-							timestamp: packet.header.timestamp,
-							marker: packet.header.marker,
-							ssrc: packet.header.ssrc,
-							payload: packet.payload.to_vec(),
-						};
-						if is_video {
-							if let Some(codec) = video_payload_types.get(&packet.header.payload_type) {
-								let _ = video_tx.send((info, *codec));
+					// Do not block the on_track handler: webrtc-rs holds the handler
+					// mutex while awaiting it, so a long-running read loop would starve
+					// other tracks (e.g. audio never starting when video arrives first).
+					tokio::spawn(async move {
+						let is_video = track.kind() == RTPCodecType::Video;
+						let track_kind = if is_video { "video" } else { "audio" };
+						let track_ssrc = track.ssrc();
+						let track_pt = track.payload_type();
+						info!("Broadcast {track_kind} track started (ssrc={track_ssrc}, pt={track_pt})");
+						let mut first_packet_logged = false;
+						let mut dropped_pt_mismatch: u64 = 0;
+						loop {
+							match track.read_rtp().await {
+								Ok((packet, _attributes)) => {
+									if !first_packet_logged {
+										info!(
+											"Broadcast {track_kind} first packet (ssrc={}, pt={}, seq={}, ts={}, {} bytes)",
+											packet.header.ssrc,
+											packet.header.payload_type,
+											packet.header.sequence_number,
+											packet.header.timestamp,
+											packet.payload.len()
+										);
+										first_packet_logged = true;
+									}
+									let info = RtpPacketInfo {
+										sequence_number: packet.header.sequence_number,
+										timestamp: packet.header.timestamp,
+										marker: packet.header.marker,
+										ssrc: packet.header.ssrc,
+										payload: packet.payload.to_vec(),
+									};
+									if is_video {
+										if let Some(codec) = video_payload_types.get(&packet.header.payload_type) {
+											let _ = video_tx.send((info, *codec));
+										} else {
+											dropped_pt_mismatch += 1;
+											if dropped_pt_mismatch <= 5 || dropped_pt_mismatch % 500 == 0 {
+												warn!(
+													"Broadcast video packet dropped: unexpected payload type {} (ssrc={}, count={})",
+													packet.header.payload_type, packet.header.ssrc, dropped_pt_mismatch
+												);
+											}
+										}
+									} else if packet.header.payload_type == opus_payload_type {
+										let _ = audio_tx.send(info);
+									} else {
+										dropped_pt_mismatch += 1;
+										if dropped_pt_mismatch <= 5 || dropped_pt_mismatch % 500 == 0 {
+											warn!(
+												"Broadcast audio packet dropped: unexpected payload type {} (expected {}, ssrc={}, count={})",
+												packet.header.payload_type, opus_payload_type, packet.header.ssrc, dropped_pt_mismatch
+											);
+										}
+									}
+								}
+								Err(e) => {
+									info!("Broadcast {track_kind} track read loop ended (ssrc={track_ssrc}, pt={track_pt}): {e}");
+									break;
+								}
 							}
-						} else if packet.header.payload_type == opus_payload_type {
-							let _ = audio_tx.send(info);
 						}
-					}
+						if dropped_pt_mismatch > 0 {
+							warn!("Broadcast {track_kind} track dropped {dropped_pt_mismatch} packets due to payload type mismatch");
+						}
+					});
 				})
 			}));
 		}
