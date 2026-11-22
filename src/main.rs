@@ -320,6 +320,8 @@ fn init_file_logging() -> anyhow::Result<PathBuf> {
         .map_err(|e| anyhow!("Failed to initialize logger: {e}"))?;
 
     info!("=== of-scraper-rs v{} starting ===", env!("CARGO_PKG_VERSION"));
+    let config_path = resolve_config_path("config.conf");
+    info!("Config path: {} (exists={})", config_path.display(), config_path.exists());
     Ok(log_path)
 }
 
@@ -1776,6 +1778,7 @@ async fn record_cli(client: &OFClient, user: &str) -> anyhow::Result<()> {
     let download_path = get_download_path();
     let creator_path = download_path.join(&username);
     // Load fresh so config edits made before starting this recording take effect.
+    let config_path = resolve_config_path("config.conf");
     let cfg = config::AppConfig::load();
     let options = livestream::RecorderOptions {
         file_name_format: cfg.livestream.file_name_format.clone(),
@@ -1783,8 +1786,10 @@ async fn record_cli(client: &OFClient, user: &str) -> anyhow::Result<()> {
         ffmpeg_path: cfg.ffmpeg_path.clone(),
     };
     info!(
-        "Livestream options for @{username}: output_format={:?}, ffmpeg_path={:?}",
-        options.output_format, options.ffmpeg_path
+        "Livestream options for @{username}: output_format={:?}, ffmpeg_path={:?}, config={}",
+        options.output_format,
+        options.ffmpeg_path,
+        config_path.display()
     );
     let user_agent = client.headers.read().unwrap().user_agent.clone();
     // Edge discovery talks to the media vendor, not the site: unsigned client.
@@ -1864,6 +1869,7 @@ pub async fn run_recording_tui(
     };
     let creator_path = download_path.join(&username);
     // Load fresh so config edits made while the TUI is open take effect.
+    let config_path = resolve_config_path("config.conf");
     let cfg = config::AppConfig::load();
     let options = livestream::RecorderOptions {
         file_name_format: cfg.livestream.file_name_format.clone(),
@@ -1873,13 +1879,17 @@ pub async fn run_recording_tui(
     {
         let mut s = state.lock().unwrap();
         s.log(format!(
-            "Livestream options: output_format={:?}, ffmpeg_path={:?}",
-            options.output_format, options.ffmpeg_path
+            "Livestream options: output_format={:?}, ffmpeg_path={:?}, config={}",
+            options.output_format,
+            options.ffmpeg_path,
+            config_path.display()
         ));
     }
     info!(
-        "Livestream options for @{username}: output_format={:?}, ffmpeg_path={:?}",
-        options.output_format, options.ffmpeg_path
+        "Livestream options for @{username}: output_format={:?}, ffmpeg_path={:?}, config={}",
+        options.output_format,
+        options.ffmpeg_path,
+        config_path.display()
     );
     let user_agent = client.headers.read().unwrap().user_agent.clone();
     // Edge discovery talks to the media vendor, not the site: unsigned client.

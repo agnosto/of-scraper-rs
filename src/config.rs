@@ -188,7 +188,9 @@ impl AppConfig {
 		let mut cfg = AppConfig::default();
 
 		let path = resolve_config_path("config.conf");
+		log::info!("Loading config from {}", path.display());
 		if !path.exists() {
+			log::info!("Config file not found at {}; using defaults", path.display());
 			return cfg;
 		}
 		// Self-update: older config files keep every value the user set, but

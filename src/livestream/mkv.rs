@@ -444,6 +444,9 @@ pub struct LiveMuxer {
 	first_audio_arrival_ms: i64,
 	last_flush_ms: i64,
 	finished: bool,
+	audio_frames_received: u64,
+	audio_frames_written: u64,
+	video_frames_written: u64,
 	/// Called when a part's file is complete and closed.
 	pub part_completed: Option<PartCompleted>,
 }
@@ -472,6 +475,9 @@ impl LiveMuxer {
 			first_audio_arrival_ms: -1,
 			last_flush_ms: 0,
 			finished: false,
+			audio_frames_received: 0,
+			audio_frames_written: 0,
+			video_frames_written: 0,
 			part_completed: None,
 		}
 	}
@@ -506,6 +512,10 @@ impl LiveMuxer {
 		Ok(total)
 	}
 
+	pub fn media_stats(&self) -> (u64, u64, u64) {
+		(self.audio_frames_received, self.audio_frames_written, self.video_frames_written)
+	}
+
 	/// Adds a complete video frame. H.264 needs its decoder configuration
 	/// (`codec_private`), so frames arriving before the parameter sets are
 	/// ignored rather than starting an undecodable track.
@@ -535,6 +545,7 @@ impl LiveMuxer {
 		if self.finished || opus_packet.is_empty() {
 			return Ok(());
 		}
+		self.audio_frames_received += 1;
 		let ms = self.audio_timeline.map(rtp_timestamp, ssrc, arrival_ms);
 		if self.first_audio_arrival_ms < 0 {
 			self.first_audio_arrival_ms = arrival_ms;
@@ -649,6 +660,17 @@ impl LiveMuxer {
 			bytes,
 			has_video: self.video_codec.is_some(),
 		};
+		log::info!(
+			"Muxer part {} closed: {}ms, {} bytes, video={}, audio_received={}, audio_written={}, video_written={}, pending_dropped={}",
+			part.number,
+			part.duration_ms,
+			part.bytes,
+			part.has_video,
+			self.audio_frames_received,
+			self.audio_frames_written,
+			self.video_frames_written,
+			self.pending.len(),
+		);
 		self.output = None;
 		self.video_codec = None;
 		self.first_audio_arrival_ms = -1;
@@ -686,6 +708,11 @@ impl LiveMuxer {
 			}
 			let track = if frame.is_video { VIDEO_TRACK } else { self.audio_track };
 			writer.write_frame(track, frame.time_ms - self.origin_ms, frame.is_key_frame, frame.is_video, &frame.data)?;
+			if frame.is_video {
+				self.video_frames_written += 1;
+			} else {
+				self.audio_frames_written += 1;
+			}
 			count += 1;
 		}
 		self.pending.drain(0..count);

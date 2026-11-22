@@ -240,6 +240,13 @@ pub async fn record(
 	let _ = muxer.finish();
 	let duration_ms = muxer.duration_ms().unwrap_or(0);
 	let bytes = muxer.bytes_written().unwrap_or(0);
+	let (audio_received, audio_written, video_written) = muxer.media_stats();
+	info!(
+		"Livestream media stats for @{username}: audio_received={audio_received}, audio_written={audio_written}, video_written={video_written}, duration_ms={duration_ms}, bytes={bytes}"
+	);
+	if audio_received > 0 && audio_written == 0 {
+		warn!("Livestream recorded audio packets but wrote none to output for @{username}; audio may be missing from the recording");
+	}
 	let warning = finish_files(client, creator_path, &files, stream.as_ref(), reason, options, &report).await;
 	report_stats!(RecordingState::Finished);
 
@@ -457,6 +464,10 @@ async fn run_session(
 	};
 
 	let received_media = pipeline.received_media();
+	info!(
+		"Broadcast session media pipeline: audio_packets={}, video_packets={}, received_media={}",
+		pipeline.audio_packets, pipeline.video_packets, received_media
+	);
 	LiveSession::dispose_parts(peer, socket).await;
 	Ok((outcome, received_media))
 }
@@ -471,6 +482,8 @@ struct MediaPipeline {
 	need_key_frame: bool,
 	last_key_frame_request_ms: i64,
 	last_media_ms: i64,
+	audio_packets: u64,
+	video_packets: u64,
 }
 
 impl MediaPipeline {
@@ -484,6 +497,8 @@ impl MediaPipeline {
 			need_key_frame: true,
 			last_key_frame_request_ms: -KEY_FRAME_REQUEST_INTERVAL_MS,
 			last_media_ms: -1,
+			audio_packets: 0,
+			video_packets: 0,
 		}
 	}
 
@@ -500,6 +515,7 @@ impl MediaPipeline {
 		now: i64,
 	) -> anyhow::Result<()> {
 		self.last_media_ms = now;
+		self.video_packets += 1;
 		let ssrc = packet.ssrc;
 		if self.video_buffer.is_none()
 			|| ssrc != self.video_ssrc
@@ -533,6 +549,7 @@ impl MediaPipeline {
 		now: i64,
 	) -> anyhow::Result<()> {
 		self.last_media_ms = now;
+		self.audio_packets += 1;
 		let ssrc = packet.ssrc;
 		if self.audio_buffer.is_none() || ssrc != self.audio_ssrc {
 			self.audio_ssrc = ssrc;
