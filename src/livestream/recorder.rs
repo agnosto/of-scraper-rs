@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use super::convert;
 use super::filenames;
 use super::mkv::LiveMuxer;
-use super::rtp::{H264Depacketizer, LiveVideoCodec, RtpPacketInfo, RtpReorderBuffer, VideoDepacketizer, Vp8Depacketizer};
+use super::rtp::{H264Depacketizer, LiveVideoCodec, RtpPacketInfo, RtpReleaseEvent, RtpReorderBuffer, VideoDepacketizer, Vp8Depacketizer};
 use super::session::{LiveSession, MediaKind};
 use super::store::{self, LivestreamRecord, RecordingRecord};
 use super::{EndReason, OutputFormat, RecordingResult, RecordingState, RecordingStatus};
@@ -531,12 +531,15 @@ impl MediaPipeline {
 			self.request_key_frame(peer, now).await;
 		}
 
-		let (released, missing) = self.video_buffer.as_mut().unwrap().push(packet, now);
+		let (events, missing) = self.video_buffer.as_mut().unwrap().push(packet, now);
 		if !missing.is_empty() {
 			LiveSession::request_retransmission_on(peer, MediaKind::Video, ssrc, &missing).await;
 		}
-		for packet in released {
-			self.on_ordered_video(packet, peer, muxer, now).await?;
+		for event in events {
+			match event {
+				RtpReleaseEvent::Packet(packet) => self.on_ordered_video(packet, peer, muxer, now).await?,
+				RtpReleaseEvent::Loss(_) => self.on_video_loss(peer, now).await,
+			}
 		}
 		Ok(())
 	}
@@ -555,12 +558,14 @@ impl MediaPipeline {
 			self.audio_ssrc = ssrc;
 			self.audio_buffer = Some(RtpReorderBuffer::new());
 		}
-		let (released, missing) = self.audio_buffer.as_mut().unwrap().push(packet, now);
+		let (events, missing) = self.audio_buffer.as_mut().unwrap().push(packet, now);
 		if !missing.is_empty() {
 			LiveSession::request_retransmission_on(peer, MediaKind::Audio, ssrc, &missing).await;
 		}
-		for packet in released {
-			muxer.add_audio_frame(packet.payload, packet.timestamp, ssrc, now)?;
+		for event in events {
+			if let RtpReleaseEvent::Packet(packet) = event {
+				muxer.add_audio_frame(packet.payload, packet.timestamp, ssrc, now)?;
+			}
 		}
 		Ok(())
 	}
@@ -572,19 +577,21 @@ impl MediaPipeline {
 		muxer: &mut LiveMuxer,
 	) -> anyhow::Result<()> {
 		if let Some(buffer) = &mut self.video_buffer {
-			let (released, losses) = buffer.flush(now);
-			for packet in released {
-				self.on_ordered_video(packet, peer, muxer, now).await?;
-			}
-			for _ in losses {
-				self.on_video_loss(peer, now).await;
+			let events = buffer.flush(now);
+			for event in events {
+				match event {
+					RtpReleaseEvent::Packet(packet) => self.on_ordered_video(packet, peer, muxer, now).await?,
+					RtpReleaseEvent::Loss(_) => self.on_video_loss(peer, now).await,
+				}
 			}
 		}
 		if let Some(buffer) = &mut self.audio_buffer {
-			let (released, _) = buffer.flush(now);
-			for packet in released {
-				let ssrc = self.audio_ssrc;
-				muxer.add_audio_frame(packet.payload, packet.timestamp, ssrc, now)?;
+			let events = buffer.flush(now);
+			let ssrc = self.audio_ssrc;
+			for event in events {
+				if let RtpReleaseEvent::Packet(packet) = event {
+					muxer.add_audio_frame(packet.payload, packet.timestamp, ssrc, now)?;
+				}
 			}
 		}
 		if self.need_key_frame && self.video_buffer.is_some() {

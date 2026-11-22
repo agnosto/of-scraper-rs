@@ -43,6 +43,14 @@ pub trait VideoDepacketizer {
 	}
 }
 
+/// An event produced by the reorder buffer in stream order.
+#[derive(Debug)]
+pub enum RtpReleaseEvent {
+	Packet(RtpPacketInfo),
+	/// `count` sequence numbers were skipped after waiting too long.
+	Loss(i32),
+}
+
 /// Releases the packets of one RTP stream in sequence order. A missing packet
 /// is waited for briefly, giving a retransmission time to arrive, before the
 /// gap is reported as lost and later packets are released.
@@ -76,9 +84,9 @@ impl RtpReorderBuffer {
 		}
 	}
 
-	/// Adds a packet, returning the packets released in order and the sequence
+	/// Adds a packet, returning release events in stream order and the sequence
 	/// numbers newly found missing (so they can be requested again).
-	pub fn push(&mut self, packet: RtpPacketInfo, now_ms: i64) -> (Vec<RtpPacketInfo>, Vec<u16>) {
+	pub fn push(&mut self, packet: RtpPacketInfo, now_ms: i64) -> (Vec<RtpReleaseEvent>, Vec<u16>) {
 		let extended = self.extend(packet.sequence_number);
 		if self.next < 0 {
 			self.next = extended;
@@ -99,37 +107,35 @@ impl RtpReorderBuffer {
 		}
 
 		self.pending.insert(extended, (packet, now_ms));
-		let (released, _) = self.release(now_ms);
-		(released, missing)
+		(self.release(now_ms), missing)
 	}
 
 	/// Gives up on gaps that have waited too long. Call periodically so a
 	/// stalled stream still drains.
-	pub fn flush(&mut self, now_ms: i64) -> (Vec<RtpPacketInfo>, Vec<i32>) {
+	pub fn flush(&mut self, now_ms: i64) -> Vec<RtpReleaseEvent> {
 		self.release(now_ms)
 	}
 
 	/// Releases everything still buffered, reporting the remaining gaps as lost.
-	pub fn drain(&mut self) -> (Vec<RtpPacketInfo>, Vec<i32>) {
+	pub fn drain(&mut self) -> Vec<RtpReleaseEvent> {
 		self.release(i64::MAX)
 	}
 
-	fn release(&mut self, now_ms: i64) -> (Vec<RtpPacketInfo>, Vec<i32>) {
-		let mut released = Vec::new();
-		let mut losses = Vec::new();
+	fn release(&mut self, now_ms: i64) -> Vec<RtpReleaseEvent> {
+		let mut events = Vec::new();
 		loop {
 			while let Some((packet, _)) = self.pending.remove(&self.next) {
-				released.push(packet);
+				events.push(RtpReleaseEvent::Packet(packet));
 				self.next += 1;
 			}
 			if self.pending.is_empty() {
-				return (released, losses);
+				return events;
 			}
 			let (oldest_key, arrival_ms) = self.pending.first_key_value().map(|(k, v)| (*k, v.1)).unwrap();
 			if self.pending.len() <= self.max_buffered_packets && now_ms - arrival_ms < self.max_wait_ms {
-				return (released, losses);
+				return events;
 			}
-			losses.push((oldest_key - self.next) as i32);
+			events.push(RtpReleaseEvent::Loss((oldest_key - self.next) as i32));
 			self.next = oldest_key;
 		}
 	}
@@ -634,17 +640,21 @@ mod tests {
 	fn reorder_buffer_releases_in_order_and_reports_gaps() {
 		let mut buffer = RtpReorderBuffer::new();
 		// The first packet defines the start and is released immediately.
-		let (released, missing) = buffer.push(packet(2, 200, false, &[2]), 1000);
-		assert_eq!(released.iter().map(|p| p.sequence_number).collect::<Vec<_>>(), vec![2]);
+		let (events, missing) = buffer.push(packet(2, 200, false, &[2]), 1000);
+		let released: Vec<u16> = events.iter().filter_map(|e| match e { RtpReleaseEvent::Packet(p) => Some(p.sequence_number), _ => None }).collect();
+		assert_eq!(released, vec![2]);
 		assert!(missing.is_empty());
 		// seq 4 arrives before 3: 3 is reported missing, 4 waits for the gap.
-		let (released, missing) = buffer.push(packet(4, 400, true, &[4]), 1001);
+		let (events, missing) = buffer.push(packet(4, 400, true, &[4]), 1001);
 		assert_eq!(missing, vec![3]);
-		assert!(released.is_empty());
-		// Once the gap has waited out, 4 is released and the gap is reported lost.
-		let (released, losses) = buffer.flush(1001 + 500);
-		assert_eq!(released.iter().map(|p| p.sequence_number).collect::<Vec<_>>(), vec![4]);
-		assert_eq!(losses, vec![1]);
+		assert!(events.is_empty());
+		// Once the gap has waited out, the loss is reported before the packet released after it.
+		let events = buffer.flush(1001 + 500);
+		assert!(matches!(events.get(0), Some(RtpReleaseEvent::Loss(1))));
+		match events.get(1) {
+			Some(RtpReleaseEvent::Packet(p)) => assert_eq!(p.sequence_number, 4),
+			other => panic!("expected packet after loss, got {other:?}"),
+		}
 	}
 
 	#[test]
