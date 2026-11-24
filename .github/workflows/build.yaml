@@ -43,7 +43,7 @@ jobs:
         run: |
           mkdir -p bundle
           cp "target/release/${{ matrix.binary_name }}" bundle/
-          cp config.conf-example bundle/
+          cp config.conf-example bundle/config.conf
           cp auth.json-example bundle/
 
       - name: Zip bundle (for release upload, Linux/macOS)
