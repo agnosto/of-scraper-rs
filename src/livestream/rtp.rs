@@ -16,6 +16,9 @@ pub struct RtpPacketInfo {
 	pub timestamp: u32,
 	pub marker: bool,
 	pub ssrc: u32,
+	/// Monotonic recording time at which the packet entered the media pipeline.
+	/// Reordering must not replace this with the later release time.
+	pub arrival_ms: i64,
 	pub payload: Vec<u8>,
 }
 
@@ -25,6 +28,9 @@ pub struct RtpPacketInfo {
 pub struct EncodedVideoFrame {
 	pub data: Vec<u8>,
 	pub rtp_timestamp: u32,
+	/// Arrival time of the packet that started this frame, not the marker packet
+	/// that finished assembling it.
+	pub arrival_ms: i64,
 	pub is_key_frame: bool,
 	pub width: u32,
 	pub height: u32,
@@ -72,7 +78,6 @@ impl RtpReorderBuffer {
 	// Offset keeps extended sequence numbers positive when packets older than
 	// the first one arrive.
 	const INITIAL_EXTENSION: i64 = 1 << 20;
-	const MAX_REPORTED_MISSING: usize = 64;
 
 	pub fn new() -> Self {
 		Self {
@@ -99,7 +104,7 @@ impl RtpReorderBuffer {
 		if extended > self.highest {
 			let from = (self.highest + 1).max(self.next);
 			let mut sequence = from;
-			while sequence < extended && missing.len() < Self::MAX_REPORTED_MISSING {
+			while sequence < extended {
 				missing.push(sequence as u16);
 				sequence += 1;
 			}
@@ -153,6 +158,7 @@ impl RtpReorderBuffer {
 pub struct Vp8Depacketizer {
 	frame: Vec<u8>,
 	timestamp: u32,
+	arrival_ms: i64,
 	in_frame: bool,
 }
 
@@ -164,7 +170,7 @@ impl Default for Vp8Depacketizer {
 
 impl Vp8Depacketizer {
 	pub fn new() -> Self {
-		Self { frame: Vec::new(), timestamp: 0, in_frame: false }
+		Self { frame: Vec::new(), timestamp: 0, arrival_ms: 0, in_frame: false }
 	}
 
 	/// Returns the payload offset past the VP8 payload descriptor and whether
@@ -209,10 +215,17 @@ impl VideoDepacketizer for Vp8Depacketizer {
 	}
 
 	fn push(&mut self, packet: &RtpPacketInfo) -> Option<EncodedVideoFrame> {
-		let (offset, start_of_frame) = Self::try_read_descriptor(&packet.payload)?;
+		let (offset, start_of_frame) = match Self::try_read_descriptor(&packet.payload) {
+			Some(descriptor) => descriptor,
+			None => {
+				self.reset();
+				return None;
+			}
+		};
 		if start_of_frame {
 			self.frame.clear();
 			self.timestamp = packet.timestamp;
+			self.arrival_ms = packet.arrival_ms;
 			self.in_frame = true;
 		} else if !self.in_frame || packet.timestamp != self.timestamp {
 			self.reset();
@@ -235,7 +248,7 @@ impl VideoDepacketizer for Vp8Depacketizer {
 			width = (data[6] as u32 | (data[7] as u32) << 8) & 0x3FFF;
 			height = (data[8] as u32 | (data[9] as u32) << 8) & 0x3FFF;
 		}
-		Some(EncodedVideoFrame { data, rtp_timestamp: self.timestamp, is_key_frame, width, height })
+		Some(EncodedVideoFrame { data, rtp_timestamp: self.timestamp, arrival_ms: self.arrival_ms, is_key_frame, width, height })
 	}
 
 	fn reset(&mut self) {
@@ -251,6 +264,7 @@ pub struct H264Depacketizer {
 	nal_units: Vec<Vec<u8>>,
 	fragment: Option<Vec<u8>>,
 	timestamp: u32,
+	arrival_ms: i64,
 	in_frame: bool,
 	corrupt: bool,
 	sps: Option<Vec<u8>>,
@@ -275,6 +289,7 @@ impl H264Depacketizer {
 			nal_units: Vec::new(),
 			fragment: None,
 			timestamp: 0,
+			arrival_ms: 0,
 			in_frame: false,
 			corrupt: false,
 			sps: None,
@@ -335,7 +350,7 @@ impl H264Depacketizer {
 		} else {
 			(0, 0)
 		};
-		EncodedVideoFrame { data: stream, rtp_timestamp: self.timestamp, is_key_frame, width, height }
+		EncodedVideoFrame { data: stream, rtp_timestamp: self.timestamp, arrival_ms: self.arrival_ms, is_key_frame, width, height }
 	}
 }
 
@@ -357,6 +372,7 @@ impl VideoDepacketizer for H264Depacketizer {
 			self.in_frame = true;
 			self.corrupt = false;
 			self.timestamp = packet.timestamp;
+			self.arrival_ms = packet.arrival_ms;
 		}
 
 		let nal_type = payload[0] & 0x1F;
@@ -582,9 +598,9 @@ pub struct RtpTimeline {
 	clock_rate: u32,
 	started: bool,
 	ssrc: u32,
-	anchor_extended: u32,
+	anchor_extended: i64,
 	anchor_ms: i64,
-	last_extended: u32,
+	last_extended: i64,
 	last_ms: i64,
 }
 
@@ -607,8 +623,9 @@ impl RtpTimeline {
 		if !self.started || ssrc != self.ssrc {
 			return self.anchor(rtp_timestamp, ssrc, arrival_ms);
 		}
-		let extended = self.last_extended.wrapping_add(rtp_timestamp.wrapping_sub(self.last_extended));
-		let ms = self.anchor_ms + (extended.wrapping_sub(self.anchor_extended)) as i64 * 1000 / self.clock_rate as i64;
+		let delta = rtp_timestamp.wrapping_sub(self.last_extended as u32) as i32 as i64;
+		let extended = self.last_extended + delta;
+		let ms = self.anchor_ms + (extended - self.anchor_extended) * 1000 / self.clock_rate as i64;
 		if (ms - arrival_ms).abs() > Self::MAX_DRIFT_MS {
 			return self.anchor(rtp_timestamp, ssrc, arrival_ms);
 		}
@@ -620,8 +637,8 @@ impl RtpTimeline {
 	fn anchor(&mut self, rtp_timestamp: u32, ssrc: u32, arrival_ms: i64) -> i64 {
 		self.started = true;
 		self.ssrc = ssrc;
-		self.anchor_extended = rtp_timestamp;
-		self.last_extended = rtp_timestamp;
+		self.anchor_extended = rtp_timestamp as i64;
+		self.last_extended = rtp_timestamp as i64;
 		self.anchor_ms = arrival_ms.max(if self.last_ms == i64::MIN { arrival_ms } else { self.last_ms + 1 });
 		self.last_ms = self.anchor_ms;
 		self.anchor_ms
@@ -633,7 +650,7 @@ mod tests {
 	use super::*;
 
 	fn packet(seq: u16, ts: u32, marker: bool, payload: &[u8]) -> RtpPacketInfo {
-		RtpPacketInfo { sequence_number: seq, timestamp: ts, marker, ssrc: 1, payload: payload.to_vec() }
+		RtpPacketInfo { sequence_number: seq, timestamp: ts, marker, ssrc: 1, arrival_ms: 0, payload: payload.to_vec() }
 	}
 
 	#[test]
@@ -650,7 +667,7 @@ mod tests {
 		assert!(events.is_empty());
 		// Once the gap has waited out, the loss is reported before the packet released after it.
 		let events = buffer.flush(1001 + 500);
-		assert!(matches!(events.get(0), Some(RtpReleaseEvent::Loss(1))));
+		assert!(matches!(events.first(), Some(RtpReleaseEvent::Loss(1))));
 		match events.get(1) {
 			Some(RtpReleaseEvent::Packet(p)) => assert_eq!(p.sequence_number, 4),
 			other => panic!("expected packet after loss, got {other:?}"),
@@ -701,5 +718,86 @@ mod tests {
 		// a far-off arrival re-anchors instead of drifting
 		let third = timeline.map(1900 + 90_000 * 10, 7, 999_999);
 		assert_eq!(third, 999_999);
+	}
+
+	#[test]
+	fn timeline_maps_from_the_original_packet_arrival() {
+		let mut timeline = RtpTimeline::new(90_000);
+		assert_eq!(timeline.map(0, 7, 5000), 5000);
+		// Reordering may release the frame later, but its receipt time still maps it to 5100 ms.
+		assert_eq!(timeline.map(9000, 7, 5010), 5100);
+	}
+
+	#[test]
+	fn timeline_handles_small_backward_steps_and_timestamp_wraps() {
+		let mut timeline = RtpTimeline::new(90_000);
+		assert_eq!(timeline.map(1000, 7, 5000), 5000);
+		assert_eq!(timeline.map(900, 7, 5010), 5000);
+		assert_eq!(timeline.map(1900, 7, 5020), 5010);
+
+		let mut timeline = RtpTimeline::new(90_000);
+		assert_eq!(timeline.map(0xFFFF_FF00, 7, 5000), 5000);
+		assert_eq!(timeline.map(0x0000_0300, 7, 5011), 5011);
+		assert_eq!(timeline.map(0x0000_0700, 7, 5022), 5022);
+	}
+
+	#[test]
+	fn vp8_frame_keeps_the_start_packet_arrival_time() {
+		let mut start = packet(1, 90, false, &[0x90, 0x01]);
+		start.arrival_ms = 1000;
+		let mut finish = packet(2, 90, true, &[0x01, 0x02]);
+		finish.arrival_ms = 1100;
+		let mut depacketizer = Vp8Depacketizer::new();
+		assert!(depacketizer.push(&start).is_none());
+		let frame = depacketizer.push(&finish).unwrap();
+		assert_eq!(frame.arrival_ms, 1000);
+	}
+
+	#[test]
+	fn malformed_vp8_descriptor_discards_the_partial_frame() {
+		let mut depacketizer = Vp8Depacketizer::new();
+		assert!(depacketizer.push(&packet(1, 90, false, &[0x90, 0x01])).is_none());
+		assert!(depacketizer.push(&packet(2, 90, false, &[0x80])).is_none());
+		assert!(depacketizer.push(&packet(3, 90, true, &[0x01, 0x02])).is_none());
+	}
+
+	#[test]
+	fn reorder_loss_resets_vp8_before_orphan_continuation() {
+		let mut buffer = RtpReorderBuffer::new();
+		let mut depacketizer = Vp8Depacketizer::new();
+		let key = packet(1, 90, true, &[0x10, 0x00, 0x00, 0x00]);
+		let (events, _) = buffer.push(key, 1000);
+		for event in events {
+			if let RtpReleaseEvent::Packet(packet) = event {
+				assert!(depacketizer.push(&packet).is_some());
+			}
+		}
+
+		let start = packet(3, 180, false, &[0x90, 0x01]);
+		let (events, _) = buffer.push(start, 1001);
+		assert!(events.is_empty());
+		let finish = packet(5, 180, true, &[0x01, 0x02]);
+		let (events, missing) = buffer.push(finish, 1002);
+		assert_eq!(missing, vec![4]);
+		assert!(events.is_empty());
+
+		let events = buffer.flush(1300);
+		assert!(matches!(events.first(), Some(RtpReleaseEvent::Loss(1))));
+		for event in events {
+			match event {
+				RtpReleaseEvent::Loss(_) => depacketizer.reset(),
+				RtpReleaseEvent::Packet(packet) => assert!(depacketizer.push(&packet).is_none()),
+			}
+		}
+	}
+
+	#[test]
+	fn reorder_buffer_requests_every_packet_in_a_large_gap() {
+		let mut buffer = RtpReorderBuffer::new();
+		buffer.push(packet(100, 100, false, &[1]), 1000);
+		let (_, missing) = buffer.push(packet(200, 200, false, &[2]), 1001);
+		assert_eq!(missing.len(), 99);
+		assert_eq!(missing.first(), Some(&101));
+		assert_eq!(missing.last(), Some(&199));
 	}
 }

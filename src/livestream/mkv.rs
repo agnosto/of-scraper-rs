@@ -519,11 +519,11 @@ impl LiveMuxer {
 	/// Adds a complete video frame. H.264 needs its decoder configuration
 	/// (`codec_private`), so frames arriving before the parameter sets are
 	/// ignored rather than starting an undecodable track.
-	pub fn add_video_frame(&mut self, frame: EncodedVideoFrame, codec: LiveVideoCodec, codec_private: Option<&[u8]>, ssrc: u32, arrival_ms: i64) -> io::Result<()> {
+	pub fn add_video_frame(&mut self, frame: EncodedVideoFrame, codec: LiveVideoCodec, codec_private: Option<&[u8]>, ssrc: u32) -> io::Result<()> {
 		if self.finished || (codec == LiveVideoCodec::H264 && codec_private.is_none()) {
 			return Ok(());
 		}
-		let ms = self.video_timeline.map(frame.rtp_timestamp, ssrc, arrival_ms);
+		let ms = self.video_timeline.map(frame.rtp_timestamp, ssrc, frame.arrival_ms);
 		if self.writer.is_some() && self.video_codec != Some(codec) {
 			// The open part cannot hold this video; switch files at a point the new part can start from.
 			if !frame.is_key_frame {
@@ -564,7 +564,7 @@ impl LiveMuxer {
 		if self.writer.is_none() {
 			return Ok(());
 		}
-		let up_to = self.newest_ms - INTERLEAVE_WINDOW_MS;
+		let up_to = self.newest_ms.max(now_ms) - INTERLEAVE_WINDOW_MS;
 		self.release(up_to)?;
 		if now_ms - self.last_flush_ms >= CLUSTER_FLUSH_INTERVAL_MS {
 			if let Some(writer) = &mut self.writer {
@@ -585,6 +585,11 @@ impl LiveMuxer {
 	pub fn finish(&mut self) -> io::Result<()> {
 		if self.finished {
 			return Ok(());
+		}
+		if self.writer.is_none()
+			&& let Some(start_ms) = self.pending.iter().filter(|frame| !frame.is_video).map(|frame| frame.time_ms).min()
+		{
+			self.start(start_ms, None, None, 0, 0)?;
 		}
 		self.close_part()?;
 		self.pending.clear();
@@ -739,7 +744,7 @@ mod tests {
 		let mut data = vec![0x00, 0x00, 0x00]; // frame tag: key frame
 		data.extend_from_slice(&[0x9D, 0x01, 0x2A, 0x80, 0x02, 0x38, 0x01]); // start code + 640x312
 		data.extend_from_slice(&[0xAA; 32]);
-		EncodedVideoFrame { data, rtp_timestamp: 1000, is_key_frame: true, width: 640, height: 312 }
+		EncodedVideoFrame { data, rtp_timestamp: 1000, arrival_ms: 1000, is_key_frame: true, width: 640, height: 312 }
 	}
 
 	#[test]
@@ -760,10 +765,10 @@ mod tests {
 		// Non-key video is dropped until a key frame arrives.
 		let mut non_key = vp8_key_frame();
 		non_key.is_key_frame = false;
-		muxer.add_video_frame(non_key, LiveVideoCodec::Vp8, None, 1, 1000).unwrap();
+		muxer.add_video_frame(non_key, LiveVideoCodec::Vp8, None, 1).unwrap();
 		assert!(!muxer.is_started());
 
-		muxer.add_video_frame(vp8_key_frame(), LiveVideoCodec::Vp8, None, 1, 1000).unwrap();
+		muxer.add_video_frame(vp8_key_frame(), LiveVideoCodec::Vp8, None, 1).unwrap();
 		assert!(muxer.is_started());
 		muxer.add_audio_frame(vec![0x11; 20], 48_000, 2, 1010).unwrap();
 		muxer.pump(2000).unwrap();
@@ -785,6 +790,28 @@ mod tests {
 	}
 
 	#[test]
+	fn muxer_flushes_the_tail_during_a_quiet_spell() {
+		let dir = tempfile::tempdir().unwrap();
+		let dir_path = dir.path().to_path_buf();
+		let mut muxer = LiveMuxer::new(move |part, extension| std::fs::File::create(dir_path.join(format!("part{part}{extension}"))), 2);
+		muxer.add_video_frame(vp8_key_frame(), LiveVideoCodec::Vp8, None, 1).unwrap();
+		muxer.add_audio_frame(vec![0x11; 20], 48_000, 2, 1010).unwrap();
+		muxer.pump(2000).unwrap();
+		assert_eq!(muxer.media_stats(), (1, 1, 1));
+	}
+
+	#[test]
+	fn muxer_finishes_a_short_audio_only_recording() {
+		let dir = tempfile::tempdir().unwrap();
+		let dir_path = dir.path().to_path_buf();
+		let mut muxer = LiveMuxer::new(move |part, extension| std::fs::File::create(dir_path.join(format!("part{part}{extension}"))), 2);
+		muxer.add_audio_frame(vec![0x11; 20], 0, 2, 1000).unwrap();
+		muxer.finish().unwrap();
+		assert!(dir.path().join("part1.webm").exists());
+		assert_eq!(muxer.media_stats(), (1, 1, 0));
+	}
+
+	#[test]
 	fn muxer_switches_to_mkv_for_h264() {
 		let dir = tempfile::tempdir().unwrap();
 		let dir_path = dir.path().to_path_buf();
@@ -803,7 +830,7 @@ mod tests {
 			d.extend_from_slice(&[0x65, 0x88, 0x84, 0x00]);
 			d
 		};
-		muxer.add_video_frame(frame, LiveVideoCodec::H264, Some(&avcc), 1, 1000).unwrap();
+		muxer.add_video_frame(frame, LiveVideoCodec::H264, Some(&avcc), 1).unwrap();
 		muxer.finish().unwrap();
 		assert!(dir.path().join("part1.mkv").exists());
 		let bytes = std::fs::read(dir.path().join("part1.mkv")).unwrap();

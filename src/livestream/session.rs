@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use log::{debug, info, warn};
 use of_client::livestream::AgoraCredentials;
@@ -34,6 +35,7 @@ const OPUS_PAYLOAD_TYPE: u8 = 111;
 
 const VIDEO_FEEDBACK: [&str; 4] = ["transport-cc", "nack", "nack pli", "ccm fir"];
 const AUDIO_FEEDBACK: [&str; 2] = ["transport-cc", "nack"];
+const MEDIA_CHANNEL_CAPACITY: usize = 1024;
 
 /// Which gateway stream kind a retransmission request is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,8 +49,8 @@ pub enum MediaKind {
 pub struct LiveSession {
 	pub peer: Arc<RTCPeerConnection>,
 	pub socket: Arc<GatewaySocket>,
-	pub video_rx: mpsc::UnboundedReceiver<(RtpPacketInfo, LiveVideoCodec)>,
-	pub audio_rx: mpsc::UnboundedReceiver<RtpPacketInfo>,
+	pub video_rx: mpsc::Receiver<(RtpPacketInfo, LiveVideoCodec)>,
+	pub audio_rx: mpsc::Receiver<RtpPacketInfo>,
 	/// `true` when the broadcaster left the channel, `false` when they (re)appeared.
 	pub presence_rx: mpsc::UnboundedReceiver<bool>,
 	/// `None` while connected, `Some(reason)` once the media or gateway connection is lost.
@@ -61,6 +63,7 @@ impl LiveSession {
 		credentials: &AgoraCredentials,
 		user_agent: &str,
 		http: &reqwest::Client,
+		clock_start: Instant,
 	) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
 		let session_id = format!("{:032x}", rand::random::<u128>());
 		let gateway = choose_server(http, credentials, &session_id).await?;
@@ -90,8 +93,8 @@ impl LiveSession {
 			.and_then(|m| m.formats.iter().find(|(_, f)| f.name.eq_ignore_ascii_case("opus")).map(|(pt, _)| *pt))
 			.unwrap_or(OPUS_PAYLOAD_TYPE);
 
-		let (video_tx, video_rx) = mpsc::unbounded_channel::<(RtpPacketInfo, LiveVideoCodec)>();
-		let (audio_tx, audio_rx) = mpsc::unbounded_channel::<RtpPacketInfo>();
+		let (video_tx, video_rx) = mpsc::channel::<(RtpPacketInfo, LiveVideoCodec)>(MEDIA_CHANNEL_CAPACITY);
+		let (audio_tx, audio_rx) = mpsc::channel::<RtpPacketInfo>(MEDIA_CHANNEL_CAPACITY);
 		let (presence_tx, presence_rx) = mpsc::unbounded_channel::<bool>();
 		let (disconnected_tx, disconnected_rx) = watch::channel::<Option<String>>(None);
 
@@ -103,6 +106,7 @@ impl LiveSession {
 				let video_tx = video_tx.clone();
 				let audio_tx = audio_tx.clone();
 				let video_payload_types = video_payload_types.clone();
+				let clock_start = clock_start;
 				Box::pin(async move {
 					// Do not block the on_track handler: webrtc-rs holds the handler
 					// mutex while awaiting it, so a long-running read loop would starve
@@ -134,14 +138,17 @@ impl LiveSession {
 										timestamp: packet.header.timestamp,
 										marker: packet.header.marker,
 										ssrc: packet.header.ssrc,
+										arrival_ms: clock_start.elapsed().as_millis() as i64,
 										payload: packet.payload.to_vec(),
 									};
 									if is_video {
 										if let Some(codec) = video_payload_types.get(&packet.header.payload_type) {
-											let _ = video_tx.send((info, *codec));
+											if video_tx.send((info, *codec)).await.is_err() {
+												break;
+											}
 										} else {
 											dropped_pt_mismatch += 1;
-											if dropped_pt_mismatch <= 5 || dropped_pt_mismatch % 500 == 0 {
+											if dropped_pt_mismatch <= 5 || dropped_pt_mismatch.is_multiple_of(500) {
 												warn!(
 													"Broadcast video packet dropped: unexpected payload type {} (ssrc={}, count={})",
 													packet.header.payload_type, packet.header.ssrc, dropped_pt_mismatch
@@ -149,10 +156,12 @@ impl LiveSession {
 											}
 										}
 									} else if packet.header.payload_type == opus_payload_type {
-										let _ = audio_tx.send(info);
+										if audio_tx.send(info).await.is_err() {
+											break;
+										}
 									} else {
 										dropped_pt_mismatch += 1;
-										if dropped_pt_mismatch <= 5 || dropped_pt_mismatch % 500 == 0 {
+										if dropped_pt_mismatch <= 5 || dropped_pt_mismatch.is_multiple_of(500) {
 											warn!(
 												"Broadcast audio packet dropped: unexpected payload type {} (expected {}, ssrc={}, count={})",
 												packet.header.payload_type, opus_payload_type, packet.header.ssrc, dropped_pt_mismatch

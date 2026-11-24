@@ -206,7 +206,7 @@ pub async fn record(
 			store::upsert_livestream(creator_path, &to_record(&info));
 		}
 
-		match run_session(&credentials, user_agent, http, &mut muxer, now_ms, &report, ct).await {
+		match run_session(&credentials, user_agent, http, &mut muxer, clock, now_ms, &report, ct).await {
 			Ok((SessionOutcome::Stopped, _)) => {
 				reason = EndReason::Stopped;
 				break;
@@ -379,16 +379,18 @@ async fn finish_files(
 }
 
 /// One broadcast session: connects, then pumps media until it ends.
+#[allow(clippy::too_many_arguments)]
 async fn run_session(
 	credentials: &AgoraCredentials,
 	user_agent: &str,
 	http: &reqwest::Client,
 	muxer: &mut LiveMuxer,
+	clock_start: Instant,
 	now_ms: impl Fn() -> i64,
 	report: &(dyn Fn(RecordingState, i64, u64) + Send + Sync),
 	ct: &CancellationToken,
 ) -> anyhow::Result<(SessionOutcome, bool)> {
-	let session = LiveSession::connect(credentials, user_agent, http)
+	let session = LiveSession::connect(credentials, user_agent, http, clock_start)
 		.await
 		.map_err(|e| anyhow::anyhow!("{e}"))?;
 	let LiveSession {
@@ -451,18 +453,19 @@ async fn run_session(
 				broadcaster_left_at_ms = if left { now_ms() } else { -1 };
 			}
 			changed = disconnected_rx.changed() => {
-				if changed.is_ok() {
-					if let Some(reason) = disconnected_rx.borrow().clone() {
-						info!("Broadcast media connection lost: {reason}");
-						break SessionOutcome::Disconnected;
-					}
-				} else {
+				if changed.is_err() {
 					break SessionOutcome::Disconnected;
 				}
+				// The tick logs the reason and exits, giving already queued media
+				// one more pass through the pipeline before disposal.
 			}
 		}
 	};
 
+	pipeline.drain(&peer, muxer, now_ms()).await?;
+	// Unblock track read loops that may be waiting on a full bounded channel.
+	drop(video_rx);
+	drop(audio_rx);
 	let received_media = pipeline.received_media();
 	info!(
 		"Broadcast session media pipeline: audio_packets={}, video_packets={}, received_media={}",
@@ -532,14 +535,14 @@ impl MediaPipeline {
 		}
 
 		let (events, missing) = self.video_buffer.as_mut().unwrap().push(packet, now);
-		if !missing.is_empty() {
-			LiveSession::request_retransmission_on(peer, MediaKind::Video, ssrc, &missing).await;
-		}
 		for event in events {
 			match event {
 				RtpReleaseEvent::Packet(packet) => self.on_ordered_video(packet, peer, muxer, now).await?,
 				RtpReleaseEvent::Loss(_) => self.on_video_loss(peer, now).await,
 			}
+		}
+		if !missing.is_empty() {
+			LiveSession::request_retransmission_on(peer, MediaKind::Video, ssrc, &missing).await;
 		}
 		Ok(())
 	}
@@ -559,13 +562,13 @@ impl MediaPipeline {
 			self.audio_buffer = Some(RtpReorderBuffer::new());
 		}
 		let (events, missing) = self.audio_buffer.as_mut().unwrap().push(packet, now);
-		if !missing.is_empty() {
-			LiveSession::request_retransmission_on(peer, MediaKind::Audio, ssrc, &missing).await;
-		}
 		for event in events {
 			if let RtpReleaseEvent::Packet(packet) = event {
-				muxer.add_audio_frame(packet.payload, packet.timestamp, ssrc, now)?;
+				muxer.add_audio_frame(packet.payload, packet.timestamp, ssrc, packet.arrival_ms)?;
 			}
+		}
+		if !missing.is_empty() {
+			LiveSession::request_retransmission_on(peer, MediaKind::Audio, ssrc, &missing).await;
 		}
 		Ok(())
 	}
@@ -590,12 +593,40 @@ impl MediaPipeline {
 			let ssrc = self.audio_ssrc;
 			for event in events {
 				if let RtpReleaseEvent::Packet(packet) = event {
-					muxer.add_audio_frame(packet.payload, packet.timestamp, ssrc, now)?;
+					muxer.add_audio_frame(packet.payload, packet.timestamp, ssrc, packet.arrival_ms)?;
 				}
 			}
 		}
 		if self.need_key_frame && self.video_buffer.is_some() {
 			self.request_key_frame(peer, now).await;
+		}
+		muxer.pump(now)?;
+		Ok(())
+	}
+
+	async fn drain(
+		&mut self,
+		peer: &Arc<webrtc::peer_connection::RTCPeerConnection>,
+		muxer: &mut LiveMuxer,
+		now: i64,
+	) -> anyhow::Result<()> {
+		if let Some(buffer) = &mut self.video_buffer {
+			let events = buffer.drain();
+			for event in events {
+				match event {
+					RtpReleaseEvent::Packet(packet) => self.on_ordered_video(packet, peer, muxer, now).await?,
+					RtpReleaseEvent::Loss(_) => self.on_video_loss(peer, now).await,
+				}
+			}
+		}
+		if let Some(buffer) = &mut self.audio_buffer {
+			let events = buffer.drain();
+			let ssrc = self.audio_ssrc;
+			for event in events {
+				if let RtpReleaseEvent::Packet(packet) = event {
+					muxer.add_audio_frame(packet.payload, packet.timestamp, ssrc, packet.arrival_ms)?;
+				}
+			}
 		}
 		muxer.pump(now)?;
 		Ok(())
@@ -622,7 +653,7 @@ impl MediaPipeline {
 			return Ok(());
 		}
 		self.need_key_frame = false;
-		muxer.add_video_frame(frame, codec, codec_private.as_deref(), self.video_ssrc, now)?;
+		muxer.add_video_frame(frame, codec, codec_private.as_deref(), self.video_ssrc)?;
 		Ok(())
 	}
 

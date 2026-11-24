@@ -320,6 +320,18 @@ fn init_file_logging() -> anyhow::Result<PathBuf> {
         .map_err(|e| anyhow!("Failed to initialize logger: {e}"))?;
 
     info!("=== of-scraper-rs v{} starting ===", env!("CARGO_PKG_VERSION"));
+    if let Ok(executable) = std::env::current_exe() {
+        let candidate = executable.with_file_name("config.conf");
+        info!("Executable path: {}", executable.display());
+        info!("Config candidate next to executable: {} (exists={})", candidate.display(), candidate.exists());
+    }
+    let working_directory = std::env::current_dir().unwrap_or_default();
+    let working_directory_candidate = working_directory.join("config.conf");
+    info!(
+        "Config candidate in working directory: {} (exists={})",
+        working_directory_candidate.display(),
+        working_directory_candidate.exists()
+    );
     let config_path = resolve_config_path("config.conf");
     info!("Config path: {} (exists={})", config_path.display(), config_path.exists());
     Ok(log_path)
@@ -1763,6 +1775,15 @@ async fn scrape_user_cli(
     Ok(())
 }
 
+fn warn_if_livestream_config_missing(config_path: &std::path::Path, options: &livestream::RecorderOptions) {
+	if !config_path.exists() && options.output_format == livestream::OutputFormat::Original {
+		warn!(
+			"No config.conf found at {}; livestream OutputFormat defaults to Original, so recordings stay WebM/MKV. Add `Livestream {{ OutputFormat = \"mp4\" }}` there to convert with FFmpeg.",
+			config_path.display()
+		);
+	}
+}
+
 /// `record <user>`: resolve the creator, then record their broadcast until it
 /// ends or Ctrl-C is pressed.
 async fn record_cli(client: &OFClient, user: &str) -> anyhow::Result<()> {
@@ -1785,6 +1806,7 @@ async fn record_cli(client: &OFClient, user: &str) -> anyhow::Result<()> {
         output_format: cfg.livestream.output_format,
         ffmpeg_path: cfg.ffmpeg_path.clone(),
     };
+    warn_if_livestream_config_missing(&config_path, &options);
     info!(
         "Livestream options for @{username}: output_format={:?}, ffmpeg_path={:?}, config={}",
         options.output_format,
@@ -1876,6 +1898,7 @@ pub async fn run_recording_tui(
         output_format: cfg.livestream.output_format,
         ffmpeg_path: cfg.ffmpeg_path.clone(),
     };
+    warn_if_livestream_config_missing(&config_path, &options);
     {
         let mut s = state.lock().unwrap();
         s.log(format!(
